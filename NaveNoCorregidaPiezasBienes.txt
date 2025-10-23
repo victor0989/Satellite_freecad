@@ -1,0 +1,412 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part, math
+
+doc = App.newDocument("Sat_Blindado")
+
+# --------------------------
+# Parámetros (m) y configuración
+# --------------------------
+P = {
+    # Cápsula presurizada
+    "capsule_d": 4.0,
+    "capsule_h_total": 6.0,   # cilindro + 2 semiesferas
+    "capsule_t": 0.030,       # espesor
+    # Módulo de propulsión (cilindro + conos)
+    "prop_h": 5.0,
+    "prop_d": 2.5,
+    "prop_cone_tip": 0.8,     # longitud de cada cono
+    # Anillo estructural (torus)
+    "ring_d": 5.0,
+    "ring_tube_r": 0.075,     # radio menor del torus (= espesor/2)
+    # Módulos cilíndricos externos
+    "ext_count": 8,
+    "ext_d": 1.2,
+    "ext_h": 2.5,
+    "ext_clear": 0.20,
+    # Struts (conectores tubulares)
+    "strut_d_main": 0.20,
+    "strut_d_diag": 0.18,
+    "diag_z_offset": 0.8,     # desfase Z para diagonales
+    # Antena (casquete esférico)
+    "dish_d": 2.5,
+    "dish_depth": 0.5,
+    "dish_t": 0.005,
+    "dish_boom": 0.8,
+    # Paneles solares
+    "panel_count": 6,
+    "panel_L": 5.0,
+    "panel_W": 2.5,
+    "panel_T": 0.05,
+    "panel_boom_L": 0.8,
+    "panel_angle_deg": 90.0,  # 0 plegado, 90 desplegado
+    # Cables de potencia
+    "cable_d": 0.03,
+    # Colores (RGB 0..1)
+    "col_capsule": (0.75,0.75,0.80),
+    "col_prop":    (0.40,0.40,0.45),
+    "col_ring":    (0.65,0.65,0.70),
+    "col_strut":   (0.55,0.55,0.60),
+    "col_module":  (0.30,0.40,0.55),
+    "col_panel":   (0.05,0.25,0.45),
+    "col_boom":    (0.20,0.25,0.30),
+    "col_cable":   (0.10,0.10,0.10),
+    "col_dish":    (0.85,0.85,0.90),
+}
+
+# Densidades (kg/m3)
+RHO = {
+    "Al2219": 2840.0,
+    "Ti64": 4430.0,
+    "CFRP": 1550.0,
+    "KevlarCFRP": 1500.0,
+    "Inconel718": 8190.0,
+}
+
+# --------------------------
+# Utilidades
+# --------------------------
+def set_density(obj, rho):
+    if not hasattr(obj, "Density"):
+        obj.addProperty("App::PropertyFloat", "Density", "Material", "Densidad kg/m3")
+    obj.Density = rho
+
+def set_color(obj, rgb):
+    try:
+        obj.ViewObject.ShapeColor = rgb
+    except Exception:
+        pass
+
+def cyl_between(p1, p2, radius, name):
+    """Cilindro macizo entre dos puntos (eje a lo largo de p1->p2)."""
+    v1 = App.Vector(p1)
+    v2 = App.Vector(p2)
+    axis = v2.sub(v1)
+    L = axis.Length
+    if L <= 1e-6:
+        c = doc.addObject("Part::Cylinder", name)
+        c.Radius = radius; c.Height = 0.0
+        return c
+    c = doc.addObject("Part::Cylinder", name)
+    c.Radius = radius
+    c.Height = L
+    # rotar Z hacia axis
+    rot = App.Rotation(App.Vector(0,0,1), axis)
+    c.Placement = App.Placement(v1, rot)
+    return c
+
+def add_to(parent, obj):
+    parent.addObject(obj)
+    return obj
+
+# --------------------------
+# Contenedores por subsistema
+# --------------------------
+sat = doc.addObject("App::Part", "SAT")
+grp_primary = doc.addObject("App::Part", "EstructuraPrimaria")
+grp_secondary = doc.addObject("App::Part", "EstructuraSecundaria")
+grp_power = doc.addObject("App::Part", "Energia")
+grp_comm = doc.addObject("App::Part", "Comunicaciones")
+sat.addObject(grp_primary); sat.addObject(grp_secondary); sat.addObject(grp_power); sat.addObject(grp_comm)
+doc.recompute()
+
+# --------------------------
+# 1) Cápsula presurizada (shell de espesor t)
+# --------------------------
+def build_capsule_shell():
+    R = P["capsule_d"]/2.0
+    t = P["capsule_t"]
+    H = P["capsule_h_total"]
+    Hc = max(0.0, H - 2*R)  # altura del cilindro central
+
+    # Exterior
+    cyl_o = doc.addObject("Part::Cylinder","Caps_Cyl_O")
+    cyl_o.Radius = R; cyl_o.Height = Hc
+    cyl_o.Placement.Base = App.Vector(0,0,-Hc/2.0)
+
+    sph_top_o = doc.addObject("Part::Sphere","Caps_SphTop_O")
+    sph_top_o.Radius = R; sph_top_o.Placement.Base = App.Vector(0,0,Hc/2.0)
+
+    sph_bot_o = doc.addObject("Part::Sphere","Caps_SphBot_O")
+    sph_bot_o.Radius = R; sph_bot_o.Placement.Base = App.Vector(0,0,-Hc/2.0)
+
+    # Cortes hemisféricos (dejar medias esferas)
+    # Planos de corte mediante cajas
+    box_top = doc.addObject("Part::Box","_Caps_CutTop")
+    box_top.Length = box_top.Width = 20; box_top.Height = 20
+    box_top.Placement.Base = App.Vector(-10,-10,Hc/2.0)
+
+    hemi_top = doc.addObject("Part::Cut","Caps_HemiTop_O")
+    hemi_top.Base = sph_top_o; hemi_top.Tool = box_top
+
+    box_bot = doc.addObject("Part::Box","_Caps_CutBot")
+    box_bot.Length = box_bot.Width = 20; box_bot.Height = 20
+    box_bot.Placement.Base = App.Vector(-10,-10,-Hc/2.0)
+    hemi_bot = doc.addObject("Part::Cut","Caps_HemiBot_O")
+    hemi_bot.Base = sph_bot_o; hemi_bot.Tool = box_bot
+
+    outer = doc.addObject("Part::MultiFuse","Capsule_Outer")
+    outer.Shapes = [cyl_o, hemi_top, hemi_bot]
+
+    # Interior (para espesor)
+    Ri = max(0.01, R - t)
+    Hci = max(0.0, H - 2*R)
+    cyl_i = doc.addObject("Part::Cylinder","Caps_Cyl_I")
+    cyl_i.Radius = Ri; cyl_i.Height = Hci
+    cyl_i.Placement.Base = App.Vector(0,0,-Hci/2.0)
+
+    sph_top_i = doc.addObject("Part::Sphere","Caps_SphTop_I")
+    sph_top_i.Radius = Ri; sph_top_i.Placement.Base = App.Vector(0,0,Hci/2.0)
+
+    sph_bot_i = doc.addObject("Part::Sphere","Caps_SphBot_I")
+    sph_bot_i.Radius = Ri; sph_bot_i.Placement.Base = App.Vector(0,0,-Hci/2.0)
+
+    hemi_top_i = doc.addObject("Part::Cut","Caps_HemiTop_I")
+    hemi_top_i.Base = sph_top_i; hemi_top_i.Tool = box_top
+
+    hemi_bot_i = doc.addObject("Part::Cut","Caps_HemiBot_I")
+    hemi_bot_i.Base = sph_bot_i; hemi_bot_i.Tool = box_bot
+
+    inner = doc.addObject("Part::MultiFuse","Capsule_Inner")
+    inner.Shapes = [cyl_i, hemi_top_i, hemi_bot_i]
+
+    shell = doc.addObject("Part::Cut","Capsule")
+    shell.Base = outer; shell.Tool = inner
+
+    add_to(grp_primary, shell)
+    set_density(shell, RHO["Al2219"])
+    set_color(shell, P["col_capsule"])
+    return shell
+
+# --------------------------
+# 2) Módulo de propulsión (cilindro + conos)
+# --------------------------
+def build_propulsion():
+    base_z = -P["capsule_h_total"]/2.0  # arranque bajo cápsula
+
+    cyl = doc.addObject("Part::Cylinder","Prop_Cyl")
+    cyl.Radius = P["prop_d"]/2.0; cyl.Height = P["prop_h"]
+    cyl.Placement.Base = App.Vector(0,0, base_z - P["prop_h"])
+
+    cone_top = doc.addObject("Part::Cone","Prop_ConeTop")
+    cone_top.Radius1 = P["capsule_d"]/2.0; cone_top.Radius2 = P["prop_d"]/2.0
+    cone_top.Height = P["prop_cone_tip"]
+    cone_top.Placement.Base = App.Vector(0,0, base_z - P["prop_cone_tip"])
+
+    cone_bot = doc.addObject("Part::Cone","Prop_ConeBot")
+    cone_bot.Radius1 = P["prop_d"]/2.0; cone_bot.Radius2 = 0.4
+    cone_bot.Height = P["prop_cone_tip"]
+    cone_bot.Placement.Base = App.Vector(0,0, base_z - P["prop_h"] - P["prop_cone_tip"])
+
+    prop = doc.addObject("Part::MultiFuse","Propulsion")
+    prop.Shapes = [cyl, cone_top, cone_bot]
+
+    add_to(grp_primary, prop)
+    set_density(prop, RHO["Inconel718"])
+    set_color(prop, P["col_prop"])
+    return prop
+
+# --------------------------
+# 3) Anillo estructural (torus)
+# --------------------------
+def build_ring():
+    ring = doc.addObject("Part::Torus","Ring")
+    ring.Radius1 = P["ring_d"]/2.0
+    ring.Radius2 = P["ring_tube_r"]
+    ring.Angle1 = 0; ring.Angle2 = 360
+    ring.Placement.Base = App.Vector(0,0,0)
+    add_to(grp_secondary, ring)
+    set_density(ring, RHO["Ti64"])
+    set_color(ring, P["col_ring"])
+    return ring
+
+# --------------------------
+# 4) Módulos cilíndricos externos (corona)
+# --------------------------
+def build_external_modules():
+    mods = []
+    Rring_o = P["ring_d"]/2.0 + P["ring_tube_r"]
+    Rmods = Rring_o + P["ext_clear"] + P["ext_d"]/2.0
+    for i in range(P["ext_count"]):
+        ang = i * (360.0 / P["ext_count"])
+        rad = math.radians(ang)
+        vx, vy = math.cos(rad), math.sin(rad)
+        m = doc.addObject("Part::Cylinder", f"ExtMod_{i:02d}")
+        m.Radius = P["ext_d"]/2.0
+        m.Height = P["ext_h"]
+        # Eje del cilindro paralelo a radial → rotar 90° alrededor de eje Y local tras orientar por Z
+        m.Placement.Rotation = App.Rotation(App.Vector(0,0,1), ang).multiply(App.Rotation(App.Vector(0,1,0), 90))
+        # Centrar en el plano del anillo
+        base = App.Vector(vx*Rmods, vy*Rmods, -P["ext_h"]/2.0)
+        m.Placement.Base = base
+        add_to(grp_secondary, m)
+        set_density(m, RHO["KevlarCFRP"])
+        set_color(m, P["col_module"])
+        mods.append((m, rad, App.Vector(vx,vy,0)))
+    return mods
+
+# --------------------------
+# 5) Struts (radiales, diagonales y tangenciales)
+# --------------------------
+def build_struts(mods):
+    struts = []
+    Rcaps = P["capsule_d"]/2.0
+    Rring_i = P["ring_d"]/2.0 - P["ring_tube_r"]
+    Rring_o = P["ring_d"]/2.0 + P["ring_tube_r"]
+    Rmods = Rring_o + P["ext_clear"]
+
+    # Radiales cápsula -> anillo, y anillo -> módulo
+    for i,(m, rad, vxy) in enumerate(mods):
+        vx, vy = vxy.x, vxy.y
+        # cápsula al anillo (radio interior)
+        p1 = App.Vector(vx*Rcaps, vy*Rcaps, 0.0)
+        p2 = App.Vector(vx*Rring_i, vy*Rring_i, 0.0)
+        s1 = cyl_between(p1, p2, P["strut_d_main"]/2.0, f"Strut_CA_{i:02d}")
+        add_to(grp_secondary, s1); set_density(s1, RHO["Ti64"]); set_color(s1, P["col_strut"]); struts.append(s1)
+        # anillo al módulo (hasta cara interior del módulo)
+        p3 = App.Vector(vx*Rring_o, vy*Rring_o, 0.0)
+        p4 = App.Vector(vx*Rmods, vy*Rmods, 0.0)
+        s2 = cyl_between(p3, p4, P["strut_d_main"]/2.0, f"Strut_RM_{i:02d}")
+        add_to(grp_secondary, s2); set_density(s2, RHO["Ti64"]); set_color(s2, P["col_strut"]); struts.append(s2)
+
+    # Diagonales superiores e inferiores (cápsula ±dz -> anillo)
+    dz = P["diag_z_offset"]
+    for i,(m, rad, vxy) in enumerate(mods):
+        vx, vy = vxy.x, vxy.y
+        # top
+        p1 = App.Vector(vx*Rcaps, vy*Rcaps, +dz)
+        p2 = App.Vector(vx*Rring_i, vy*Rring_i, 0.0)
+        st = cyl_between(p1, p2, P["strut_d_diag"]/2.0, f"Strut_CA_top_{i:02d}")
+        add_to(grp_secondary, st); set_density(st, RHO["Ti64"]); set_color(st, P["col_strut"]); struts.append(st)
+        # bottom
+        p1b = App.Vector(vx*Rcaps, vy*Rcaps, -dz)
+        sb = cyl_between(p1b, p2, P["strut_d_diag"]/2.0, f"Strut_CA_bot_{i:02d}")
+        add_to(grp_secondary, sb); set_density(sb, RHO["Ti64"]); set_color(sb, P["col_strut"]); struts.append(sb)
+
+    # Lazos tangenciales entre módulos vecinos (en el radio de los módulos)
+    n = len(mods)
+    for i in range(n):
+        _, _, vxy_i = mods[i]
+        _, _, vxy_j = mods[(i+1)%n]
+        p_i = App.Vector(vxy_i.x*Rmods, vxy_i.y*Rmods, 0.0)
+        p_j = App.Vector(vxy_j.x*Rmods, vxy_j.y*Rmods, 0.0)
+        st = cyl_between(p_i, p_j, P["strut_d_diag"]/2.0, f"Strut_Tan_{i:02d}")
+        add_to(grp_secondary, st); set_density(st, RHO["Ti64"]); set_color(st, P["col_strut"]); struts.append(st)
+
+    return struts
+
+# --------------------------
+# 6) Antena parabólica (casquete esférico delgado)
+# --------------------------
+def build_dish():
+    a = P["dish_d"]/2.0
+    h = P["dish_depth"]
+    R = (a*a + h*h)/(2*h)  # radio de esfera
+    # Esfera exterior e interior
+    s_out = doc.addObject("Part::Sphere","Dish_Sph_O"); s_out.Radius = R
+    s_in  = doc.addObject("Part::Sphere","Dish_Sph_I"); s_in.Radius = R - P["dish_t"]
+    shell = doc.addObject("Part::Cut","Dish_Shell"); shell.Base = s_out; shell.Tool = s_in
+    # Cortar por plano z = R - h (conservar z >= R - h)
+    cutter = doc.addObject("Part::Box","_Dish_Cut")
+    cutter.Length = cutter.Width = 4*R; cutter.Height = (R - h) + 2*R
+    cutter.Placement.Base = App.Vector(-2*R, -2*R, -2*R)
+    dish = doc.addObject("Part::Cut","Dish")
+    dish.Base = shell; dish.Tool = cutter
+    # Posicionamiento: delante y arriba de la cápsula
+    z_top = P["capsule_h_total"]/2.0
+    dish.Placement.Base = App.Vector(P["dish_boom"], 0, z_top + 0.2)
+    add_to(grp_comm, dish)
+    set_density(dish, RHO["CFRP"])
+    set_color(dish, P["col_dish"])
+    return dish
+
+# --------------------------
+# 7) Paneles y brazos
+# --------------------------
+def build_panels():
+    panels = []
+    hinge_R = P["ring_d"]/2.0 + P["ring_tube_r"] + 0.05
+    step = 360.0 / P["panel_count"]
+    for i in range(P["panel_count"]):
+        ang = i*step
+        rad = math.radians(ang)
+        vx, vy = math.cos(rad), math.sin(rad)
+
+        # Brazo
+        b = doc.addObject("Part::Box", f"PanelBoom_{i:02d}")
+        b.Length = P["panel_boom_L"]; b.Width = 0.10; b.Height = 0.10
+        b.Placement.Rotation = App.Rotation(App.Vector(0,0,1), ang)
+        b.Placement.Base = App.Vector(vx*hinge_R, vy*hinge_R, -b.Height/2.0)
+        # adelantar mitad del brazo
+        b.Placement.Base = b.Placement.Base.add(App.Vector(vx*b.Length/2.0, vy*b.Length/2.0, 0))
+        add_to(grp_power, b); set_density(b, RHO["CFRP"]); set_color(b, P["col_boom"])
+
+        # Panel
+        p = doc.addObject("Part::Box", f"Panel_{i:02d}")
+        p.Length = P["panel_L"]; p.Width = P["panel_W"]; p.Height = P["panel_T"]
+        base_rot = App.Rotation(App.Vector(0,0,1), ang)
+        # eje tangencial local (perp. a radial): (-vy, vx, 0)
+        hinge_axis = App.Vector(-vy, vx, 0)
+        deploy_rot = App.Rotation(hinge_axis, P["panel_angle_deg"])
+        p.Placement.Rotation = deploy_rot.multiply(base_rot)
+        # Posición al final del brazo y desplazado media longitud
+        base = App.Vector(vx*(hinge_R + P["panel_boom_L"]), vy*(hinge_R + P["panel_boom_L"]), P["panel_T"]/2.0)
+        base = base.add(App.Vector(vx*P["panel_L"]/2.0, vy*P["panel_L"]/2.0, 0))
+        p.Placement.Base = base
+        add_to(grp_power, p); set_density(p, RHO["CFRP"]); set_color(p, P["col_panel"])
+        panels.append((b,p, App.Vector(vx,vy,0), hinge_R))
+    return panels
+
+# --------------------------
+# 8) Cables de potencia (paneles -> bus central)
+# --------------------------
+def build_cables(panels):
+    cables = []
+    Rbus = P["capsule_d"]/2.0 + 0.2
+    for i,(b,p,vxy, hinge_R) in enumerate(panels):
+        vx, vy = vxy.x, vxy.y
+        p1 = App.Vector(vx*hinge_R, vy*hinge_R, 0.10)  # raíz del panel
+        p2 = App.Vector(vx*Rbus, vy*Rbus, 0.20)        # bus central
+        c = cyl_between(p1, p2, P["cable_d"]/2.0, f"Cable_{i:02d}")
+        add_to(grp_power, c); set_density(c, RHO["CFRP"]); set_color(c, P["col_cable"])
+        cables.append(c)
+    return cables
+
+# --------------------------
+# 9) Reporte de masas
+# --------------------------
+def report_mass(root):
+    total = 0.0
+    App.Console.PrintMessage("\n--- MASAS ESTIMADAS ---\n")
+    for obj in root.OutListRecursive:
+        if hasattr(obj, "Shape") and hasattr(obj, "Density"):
+            try:
+                V = obj.Shape.Volume
+                m = V * obj.Density
+                total += m
+                App.Console.PrintMessage(f"{obj.Name:24s}  Vol={V:9.3f} m3  rho={obj.Density:7.1f}  m={m/1000:8.2f} t\n")
+            except Exception:
+                pass
+    App.Console.PrintMessage(f"TOTAL ESTIMADO: {total/1000:.2f} t\n")
+
+# --------------------------
+# Construcción
+# --------------------------
+capsule = build_capsule_shell()
+prop = build_propulsion()
+ring = build_ring()
+mods = build_external_modules()
+struts = build_struts(mods)
+dish = build_dish()
+panels = build_panels()
+cables = build_cables(panels)
+
+doc.recompute()
+report_mass(sat)
+
+# Vista
+sat.ViewObject.DisplayMode = "Shaded"
+try:
+    Gui.SendMsgToActiveView("ViewFit")
+except Exception:
+    pass

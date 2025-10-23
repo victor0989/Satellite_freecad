@@ -1,0 +1,210 @@
+#  script base CassiniUltra_FullShieldedNotImportante
+
+# ---------- Parámetros principales ----------
+P = {
+    "tank_len": 9800.0, "tank_d": 5200.0, "hull_t": 55.0, "hull_outer_d": 6000.0,
+    "liner_t": 22.0, "tps_front_R": 3600.0, "tps_front_t": 160.0, "tps_offset": 680.0,
+    "shoulder_len": 1300.0, "bus_len": 3800.0, "bus_outer_d": 5800.0, "bus_inner_d": 5000.0,
+    "hga_R": 2400.0, "hga_t": 26.0, "hga_offset": 720.0, "hga_mast_len": 1600.0, "hga_mast_d": 240.0,
+    "chamber_len": 3000.0, "chamber_d": 2500.0, "throat_d": 820.0, "exit_d": 5200.0,
+    "nozzle_len": 4200.0, "nozzle_mid_d": 3000.0, "nozzle_mid_x": 1200.0,
+    "gimbal_ring_ro": 2500.0, "gimbal_ring_ri": 2200.0, "gimbal_ring_t": 120.0,
+    "rcs_thr_d": 420.0, "rcs_thr_len": 820.0, "rcs_ring_R": 3400.0, "rcs_count": 8,
+    "aux_thr_d": 1000.0, "aux_thr_len": 1600.0, "aux_thr_ring_R": 3600.0, "aux_thr_count": 8,
+    "solar_len": 5200.0, "solar_w": 1800.0, "solar_t": 95.0, "rad_len": 2800.0,
+    "rad_w": 1100.0, "rad_t": 52.0, "rad_z": 1600.0,
+    "rad_shield_inner_d": 6400.0, "rad_shield_t": 160.0, "rad_shield_len": 6000.0,
+    "whipple_t": 45.0, "whipple_gap": 220.0,
+    "parker_shield_R": 2400.0, "parker_shield_t": 160.0
+}
+
+
+# ---------- Parámetros adicionales ----------
+P.update({
+    "cupola_R": 2000.0, "cupola_t": 35.0, "cupola_window_w": 420.0, "cupola_window_h": 680.0,
+    "cupola_ring_t": 90.0, "cupola_phase_deg": 15.0, "cupola_windows_n": 8,
+
+    "whipple_layers": 3, "whipple_segment_n": 12,
+    "whipple_bumper_t": 8.0, "whipple_gap": 220.0, "whipple_back_t": 28.0,
+    "whipple_cover_len": 2800.0,
+
+    "pipe_main_d": 160.0, "pipe_ox_d": 140.0, "pipe_fuel_d": 140.0,
+    "pipe_wall_t": 3.0, "pipe_clearance": 180.0, "pipe_offset_phase": 20.0,
+
+    "valve_len": 220.0, "valve_d": 220.0, "reg_len": 240.0,
+    "manifold_d": 520.0, "manifold_len": 700.0,
+
+    "turbopump_len": 820.0, "turbopump_d": 620.0, "volute_d": 720.0,
+
+    "av_bay_len": 1800.0, "av_bay_w": 1400.0, "av_bay_h": 900.0,
+    "rack_w": 480.0, "rack_h": 680.0, "rack_len": 600.0, "rack_count": 4,
+    "battery_len": 600.0, "battery_w": 420.0, "battery_h": 380.0,
+
+    "strut_d": 120.0, "strut_count": 6, "load_ring_t": 120.0,
+    "sensor_mast_len": 1200.0, "sensor_mast_d": 180.0,
+    "tracker_d": 280.0, "tracker_len": 240.0
+})
+
+
+#-- Estados
+STATE = {
+   flight_stowed: True, deployed_solar: False, thermal_test: False,
+   cupola_enabled: True, whipple_enabled: True,
+   feedlines_enabled: True, turbopump_enabled: True,
+   avionics_enabled: True, sensors_enabled: True
+}
+
+#-- Materiales
+DENS = {
+      CFRP: 1600, AL: 2700, Ti: 4500, Cu: 8960, Glass: 2500, CeramicTPS: 3200, CarbonShield: 2000, Shield: 2000, PEEK: 1320, kevlar: 1440, Iconel: 8250
+}
+
+SUBSYS_MAT = {
+    Tank: AL, Liner: Ti, Hull: CFRP, TPS: CeramicTPS, Shield: CarbonShield, HGA: Glass, Solar: CFRP, Radiator: Al, RCS: Ti, Propulsión: Ti, Gimbal: Ti,
+
+Cupola: CFRP, CupolaWindow: Glass
+WhippleBumper: kevlar, WhippleBack: Al, Feedlines: Ti, Valves: Ti, Manifold: Ti, Turbopump: Iconel, AcionicsBay: CFRP, Rack: Al, Battery: Al, Strut: Ti, LoadRing: Ti, Sensors: Al
+}
+
+MARGIN_MODEL, MARGIN_INTEGRATION = 0.10, 0.05
+mass_rollup = {}
+
+# utilidades
+X_AXIS = App.Vector(1, 0, 0)
+Y_AXIS = App.Vector(0,1,0)
+ROT_TO_X = App.Rotation(Y_AXIS, 90)
+
+def place_x_aligned(s, L, cx=0, cy=0, cz=0):
+    s.Placement = App.Placement(App.Vector(cx - L / 2, cy, cz), ROT_TO_X)
+
+def add_obj(s, n, c=None):
+    o = doc.addObject(Part:Feature, n)
+    o.Shape = s
+    if c:
+       o.ViewObject.ShapeColor = c
+    return o
+
+def cyl_x(d, L, cx=0, cy=0, cz=0):
+    s = Part.makeCylinder(d / 2, L)
+    place_x_aligned(s, L, cx, cy, cz)
+    return s
+
+def cone_x(d1, d2, L, cx=0, cy=0, cz=0):
+    s = Part.makeCone(d1 / 2, d2 / 2, L)
+    place_x_aligned(s, L, cx, cy, cz)
+    return s
+
+def box_at(l, w, t, x, y, z):
+    b = Part.makeBox(l, w, t)
+    b.translate(App.Vector(x, y, z))
+    return b
+
+def add_group(n):
+    return doc.addObject("App::DocumentObjectGroup", n)
+
+def polar_positions(r, count, cx=0, z=0, phase=0):
+    return [
+        (cx, r * math.cos(math.radians(pase + 360 * i / count)),
+        z + r * math.sin(math.radians(pase + 360 * i / count)))
+]
+
+def mm3_to_m3(v)
+    return c / 1e9
+
+def mass(s, d):
+    return mm3_to_m3(s.Volume) * d
+
+def log_mass_subsys(subsys, s, mat):
+    dens = DENS.get(mat, DENS.get("Al", 2700))
+    m = mass(s, dens)
+    m *= 1 + MARGIN_MODEL + MARGIN_INTEGRATION
+    mass_rollup[subsys] = mass_rollup.get(subsys, 0) + m
+    return m
+
+#-- Nucleo
+tank_cx = 0
+tank = add_obj(cyl_x(P[tank_d], P[tank_len], cx=tank_cx), Tank, (0.2, 0.6, 1.0))
+liner = add_obj(cyl_x(P[tank_d] - 2 * P[liner_t], P[tank_len] - 2 * P[liner_t], cx=tank_cx), "TankLiner", (0.15, 0.45, 0.85))
+hull = add_obj(cyl_x(P["hull_outer_d"], P["tank_len"], cx=tank_cx).cut(tank.Shape),
+               "Hull", (0.12, 0.28, 0.5))
+
+cap_center_x = tank_cx + P[tank_len] / 2 + P[tps_offset]
+sphere_out = Part.makeSphere(P[tps_front_R])
+sphere_in = Part.makeSphere(P[tps_front_R] - P[tps_front_t])
+for s in (sphere_out, sphere in):
+    s.Placement = App.Placement(App.Vector(cap_center_x, 0, 0), App.Rotation())
+
+tps_box = Part.makeBox(2 * P[tps_front_R], 4 * P[tps_front_R], -2 * P[tps_front_R]))
+tps_front = add_obj(sphere_out.common(tps_box).cut(sphere_in.common(tps_box)),
+       "TPS_Front", (0,08, 0.08, 0.08))
+
+# Escudos Parker + solares multicapa
+Parker = add_obj(cyl_x(P["parker_shield_R"] * 2, 200,
+              cx=cap_center_x + P[tps_offset] + 200),
+     "ParkerShield", (0.15, 0.15, 0.20))
+
+#def build_solar___
+def build_solar_shields(P, base_cx):
+    grp = add_group("SolarShields")
+    n_layers = 3
+    shield_R = P["parker_shield_R"] * 1.4
+    shield_t = P["parker_shield_t"] / 2
+    gap = 350
+    for i in range(n_layers):
+        cx = base_cx + i * (shield_t + gap)
+        s = cyl_x(shield_R * 2, shield_t, cx=cx)
+        sh = add_obj(s, f"SolarShield_{i + 1}", (0.85, 0.85, 0.90))
+        grp.addObject(sh)
+        log_mass_subsys("Shield", sh.Shape, "Shield")
+return grp
+
+solar_shields_gpr = build_solar_shields(P, cap_center_x + P["tps_offset"] + 800)
+
+#--Propulsión
+def build_propulsion(P, base_cx):
+    grp = add_group("Propulsion")
+
+    Lc, Dc, Dt, Dm, De, Ln = (
+        P["chamber_len"], P["chamber_d"], P["throat_d"],
+        P["nozzle_mid_d"], P["exit_d"], P["nozzle_len"]
+)
+
+chamber = add_obj(cyl_x(Dc, Lc, cx=base_cx), "Chamber", (0.55, 0.55, 0.6))
+grp.addObjct(chamber)
+log_mass_subsys("Propulsion", chamber.Shape, "Propulsion")
+
+conv_len = 0.25 * Ln
+conv_cx = base_cx + Lc / 2 + conv_len / 2
+conv = add_obj(cone_x(Dc, Dt, conv_len, cx=conv_cx),
+        "NozzleConverging", (0.5, 0.5, 0.55))
+gpr.addObject(conv)
+
+div1_len = 0.35 * Ln
+div1_cx = conv_cx + conv_len / 2 + 
+div1_len / 2
+div1 = add_obj(cone_x(Dt, Dm, div1_len, cx=div1_cx),
+                "NozzleDiverging", (0.48, 0.48, 0.52))
+gpr.addObject(div1)
+log_mass_subsys("Propulsion", div1.Shape, "Propulsion")
+
+div2_len = max(Ln - (conv_len + div1_len), 600.0)
+div2_cx = div1_cx + div1_len / 2 + div2_len / 2
+div2 = add_obj(cone_x(Dm, De, div2_len / 2
+log_mass_subsys("Propulsion", div2.Shape, "Propulsion")
+
+ring = add_obj(
+    cyl_x(P["gimbal_ring_ro"] * 2, P["gimbal_ring_t"], cx=div1_cx)
+    .cut(cyl_x(P["gimbal_ring_ri"] * 2, P["gimbal_ring_t"], cx=div1_cx)),
+    "GimbalRing", (0.72, 0.72, 0.75)
+)
+gpr.addObject(ring)
+log_mass_subsys("Gimbal", ring.Shape, "Gimbal")
+
+return grp, div2_cx + div2_len / 2
+
+#--RCS
+
+
+
+#-- Paneles solares + radiadores estructuras
+
