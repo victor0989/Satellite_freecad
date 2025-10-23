@@ -1,0 +1,219 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name = "CassiniUltra_SpacecraftStyle"
+doc = App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label == doc_name else App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# -------------------------
+# Parámetros
+# -------------------------
+P = {
+    "tank_len": 11000.0, "tank_d": 6000.0,
+    "hull_t": 85.0, "hull_outer_d": 7000.0, "liner_t": 36.0,
+    "tps_front_R": 4200.0, "tps_front_t": 220.0, "tps_offset": 780.0,
+    "shoulder_len": 1600.0,
+    "bus_len": 5200.0, "bus_outer_d": 6800.0, "bus_inner_d": 5600.0,
+    "hga_R": 2800.0, "hga_t": 32.0, "hga_offset": 880.0,
+    "hga_mast_len": 2000.0, "hga_mast_d": 320.0,
+    "inst_bay_len": 2400.0, "inst_bay_d": 4800.0,
+    "bulkhead_t": 90.0,
+    "throat_d": 900.0, "exit_d": 5600.0, "nozzle_len": 4600.0,
+    "gimbal_ring_ro": 2800.0, "gimbal_ring_t": 160.0,
+    "frame_ring_d": 4600.0, "frame_ring_t": 140.0, "frame_step": 800.0,
+    "rcs_thr_d": 520.0, "rcs_thr_len": 900.0, "rcs_ring_R": 4200.0, "rcs_count": 12,
+    "aux_thr_d": 1200.0, "aux_thr_len": 1800.0, "aux_thr_ring_R": 4800.0, "aux_thr_count": 12,
+    "rad_shield_inner_d": 7600.0, "rad_shield_t": 220.0, "rad_shield_gap": 120.0, "rad_shield_len": 7600.0,
+    "whipple_t": 80.0, "whipple_gap": 300.0,
+    "ion_thr_d": 380.0, "ion_thr_len": 1100.0, "ion_ring_R": 3600.0, "ion_count": 16,
+    "hall_thr_d": 720.0, "hall_thr_len": 1400.0, "hall_arm_len": 1800.0,
+    "rad_len": 3200.0, "rad_w": 1400.0, "rad_t": 
+90.0, "rad_z": 1800.0,
+    "parker_shield_R": 3200.0,
+    "engine_bay_len": 2800.0,
+    "fin_len": 1600.0, "fin_w": 940.0, "fin_t": 180.0
+}
+
+# -------------------------
+# Utilidades
+# -------------------------
+X_AXIS = App.Vector(1,0,0)
+Y_AXIS = App.Vector(0,1,0)
+Z_AXIS = App.Vector(0,0,1)
+rot_to_x = lambda: App.Rotation(Y_AXIS,90)
+
+def add_obj(s,n):
+    o = doc.addObject("Part::Feature",n)
+    o.Shape = s
+    return o
+
+def color(o,rgb):
+    if hasattr(o,"ViewObject"):
+        o.ViewObject.ShapeColor = rgb
+
+def cyl_x(d,L,cx=0,cy=0,cz=0):
+    s = Part.makeCylinder(d/2.0,L)
+    s.Placement = App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x())
+    return s
+
+def cone_x(d1,d2,L,cx=0,cy=0,cz=0):
+    s = Part.makeCone(d1/2.0,d2/2.0,L)
+    s.Placement = App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x())
+    return s
+
+def sphere_section(R,t,cx):
+    so, si = Part.makeSphere(R), Part.makeSphere(R-t)
+    so.Placement = si.Placement = App.Placement(App.Vector(cx,0,0),App.Rotation())
+    box = Part.makeBox(2*R,4*R,4*R,App.Vector(cx,-2*R,-2*R))
+    return so.common(box).cut(si.common(box))
+
+def box_at(l,w,t,x,y,z):
+    b = Part.makeBox(l,w,t)
+    b.translate(App.Vector(x,y,z))
+    return b
+
+def refine_shape(shp):
+    try: return shp.removeSplitter()
+    except Exception: return shp
+
+# -------------------------
+# Construcción
+# -------------------------
+tank_cx = 0.0
+tank = cyl_x(P["tank_d"],P["tank_len"],cx=tank_cx)
+liner = cyl_x(P["tank_d"]-2*P["liner_t"],P["tank_len"]-2*P["liner_t"],cx=tank_cx)
+hull = cyl_x(P["hull_outer_d"],P["tank_len"],cx=tank_cx).cut(tank)
+
+bus_shell = cyl_x(P["bus_outer_d"],P["bus_len"],cx=tank_cx).cut(
+    cyl_x(P["bus_inner_d"],P["bus_len"]-2*P["hull_t"],cx=tank_cx))
+
+cap_center_x = tank_cx+P["tank_len"]/2.0+P["tps_offset"]
+tps_front = sphere_section(P["tps_front_R"],P["tps_front_t"],cap_center_x)
+shoulder_cx = cap_center_x-P["shoulder_len"]/2.0
+shoulder = cone_x(2*P["tps_front_R"],P["hull_outer_d"],P["shoulder_len"],cx=shoulder_cx)
+
+parker = cyl_x(P["parker_shield_R"]*2.0,240.0,cx=cap_center_x+P["tps_offset"]+220.0)
+
+payload_cx = tank_cx+P["tank_len"]/2.0-P["bus_len"]/2.0
+hga_center_x = cap_center_x-P["hga_offset"]
+hga_dish = sphere_section(P["hga_R"],P["hga_t"],hga_center_x)
+hga_mast = cyl_x(P["hga_mast_d"],P["hga_mast_len"],cx=hga_center_x-P["hga_mast_len"]/2.0)
+
+pallet = box_at(P["inst_bay_len"],P["inst_bay_d"],P["bulkhead_t"],
+                payload_cx,-P["inst_bay_d"]/2.0,-P["hull_outer_d"]/2.0)
+
+
+
+rad_shield = cyl_x(P["rad_shield_inner_d"]+P["rad_shield_t"],P["rad_shield_len"],cx=payload_cx).cut(
+    cyl_x(P["rad_shield_inner_d"],P["rad_shield_len"]+P["rad_shield_gap"],cx=payload_cx))
+
+whipple = cyl_x(P["hull_outer_d"]+P["whipple_gap"]+P["whipple_t"],P["tank_len"],cx=tank_cx).cut(
+    cyl_x(P["hull_outer_d"]+P["whipple_gap"],P["tank_len"],cx=tank_cx))
+
+# RCS thrusters
+rcs_thrusters=[]
+for i in range(P["rcs_count"]):
+    ang=2*math.pi*i/P["rcs_count"]
+    y=P["rcs_ring_R"]*math.cos(ang)
+    z=P["rcs_ring_R"]*math.sin(ang)
+    thr=cyl_x(P["rcs_thr_d"],P["rcs_thr_len"],cx=tank_cx+P["tank_len"]/2.0-P["rcs_thr_len"]/2.0,cy=y,cz=z)
+    rcs_thrusters.append(thr)
+
+# Aux thrusters
+aux_thrusters=[]
+for i in range(P["aux_thr_count"]):
+    ang=2*math.pi*i/P["aux_thr_count"]
+    y=P["aux_thr_ring_R"]*math.cos(ang)
+    z=P["aux_thr_ring_R"]*math.sin(ang)
+    thr=cone_x(P["aux_thr_d"],P["throat_d"],P["aux_thr_len"],
+               cx=tank_cx-P["tank_len"]/2.0-P["aux_thr_len"]/2.0,cy=y,cz=z)
+    aux_thrusters.append(thr)
+
+# Nozzle + gimbal
+nozzle = cone_x(P["exit_d"], P["throat_d"], P["nozzle_len"],
+                cx=tank_cx - P["tank_len"]/2.0 - P["nozzle_len"]/2.0)
+
+gimbal_ring = cyl_x(P["gimbal_ring_ro"]*2, P["gimbal_ring_t"],
+                    cx=tank_cx - P["tank_len"]/2.0 - P["gimbal_ring_t"]/2.0)
+
+# Frames internos
+frames = []
+for i in range(5):
+    cx = tank_cx - P["tank_len"]/2.0 + i*P["frame_step"]
+    frame = cyl_x(P["frame_ring_d"], P["frame_ring_t"], cx=cx)
+    frames.append(frame)
+
+# Ion thrusters
+ion_thrusters=[]
+for i in range(P["ion_count"]):
+    ang=2*math.pi*i/P["ion_count"]
+    y=P["ion_ring_R"]*math.cos(ang)
+    z=P["ion_ring_R"]*math.sin(ang)
+    thr=cyl_x(P["ion_thr_d"],P["ion_thr_len"],
+              cx=tank_cx+P["tank_len"]/2.0+P["ion_thr_len"]/2.0,cy=y,cz=z)
+    ion_thrusters.append(thr)
+
+# Hall thrusters
+hall_thrusters=[]
+for i in range(6):
+    ang=2*math.pi*i/6
+    y=(P["ion_ring_R"]+P["hall_arm_len"])*math.cos(ang)
+    z=(P["ion_ring_R"]+P["hall_arm_len"])*math.sin(ang)
+    thr=cyl_x(P["hall_thr_d"],P["hall_thr_len"],
+              cx=tank_cx+P["tank_len"]/2.0+P["hall_thr_len"]/2.0,cy=y,cz=z)
+    hall_thrusters.append(thr)
+
+# Radiadores
+rads=[]
+for i in range(4):
+    off_y = (-1)**i*(P["rad_w"]/2.0+P["hull_outer_d"]/2.0)
+    r = box_at(P["rad_len"],P["rad_w"],P["rad_t"],
+               payload_cx-P["rad_len"]/2.0,off_y,-P["rad_z"])
+    rads.append(r)
+
+# Aletas traseras
+fins=[]
+for i in range(4):
+    ang = i*math.pi/2
+    y = (P["hull_outer_d"]/2.0)*math.cos(ang)
+    z = (P["hull_outer_d"]/2.0)*math.sin(ang)
+    fin = box_at(P["fin_len"],P["fin_w"],P["fin_t"],
+                 tank_cx - P["tank_len"]/2.0 - P["fin_len"]/2.0,
+                 y - P["fin_w"]/2.0, z - P["fin_t"]/2.0)
+    fins.append(fin)
+
+# Engine bay envolvente
+engine_bay = cyl_x(P["exit_d"]*1.2, P["engine_bay_len"],
+                   cx=tank_cx - P["tank_len"]/2.0 - P["engine_bay_len"]/2.0)
+
+# Fuselaje estilizado (transiciones cónicas + cabina frontal)
+fuselage_front = cone_x(P["hull_outer_d"], P["hull_outer_d"]*0.7, 2400,
+                        cx=tank_cx + P["tank_len"]/2.0 + 1200)
+fuselage_rear = cone_x(P["hull_outer_d"]*0.7, P["exit_d"], 2800,
+                       cx=tank_cx - P["tank_len"]/2.0 - 1400)
+cockpit = sphere_section(P["hull_outer_d"]*0.6, P["hull_t"],
+                         tank_cx + P["tank_len"]/2.0 + 3200)
+
+# -------------------------
+# Ensamblaje final
+# -------------------------
+parts = [tank, liner, hull, bus_shell, tps_front, shoulder, parker,
+         hga_dish, hga_mast, pallet, rad_shield, whipple,
+         nozzle, gimbal_ring, fuselage_front, fuselage_rear,
+         cockpit, engine_bay] + rcs_thrusters + aux_thrusters + \
+        frames + ion_thrusters + hall_thrusters + rads + fins
+
+assembly = parts[0]
+for p in parts[1:]:
+    try:
+        assembly = assembly.fuse(p)
+    except Exception:
+        assembly = Part.makeCompound([assembly, p])
+
+assembly = refine_shape(assembly)
+
+obj = add_obj(assembly, "CassiniUltra_SpacecraftStyle")
+color(obj,(0.6,0.7,0.95))
+
+Gui.ActiveDocument.ActiveView.fitAll()
+App.ActiveDocument.recompute()

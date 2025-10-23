@@ -1,0 +1,211 @@
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part
+import math
+
+# =========================
+# Parametrización (mm)
+# =========================
+P = {
+    # Dimensiones exteriores CubeSat 2U
+    "L": 200.0,     # largo X
+    "W": 100.0,     # ancho Y
+    "H": 100.0,     # alto Z
+
+    # Estructura
+    "t_wall": 2.5,  # espesor de pared (2–3 mm típico)
+    "corner_fillet": 0.0,  # radio de filete en cantos del bus (0 para recto)
+
+    # Paneles solares (cada uno)
+    "panel_t": 1.5,      # espesor
+    "panel_gap": 0.5,    # separación mínima respecto a la piel del bus
+    "hinge_r": 2.0,      # radio de bisagra
+    "hinge_len": 20.0,   # longitud de cada bisagra
+    "hinge_clear": 2.0,  # holgura desde el borde
+
+    # Antenas
+    "S_len": 250.0,      # 200–300 mm típico
+    "S_d": 5.0,
+    "X_len": 120.0,      # 100–150 mm (si varilla)
+    "X_d": 5.0,
+
+    # Sensores (2 unidades)
+    "lens_d": 30.0,      # 20–40 mm
+    "lens_depth": 15.0,  # 10–20 mm
+    "lens_offset": 20.0, # separación entre centros
+
+    # Colores (opcional, 0..1)
+    "color_bus": (0.75, 0.75, 0.75),
+    "color_panel": (0.1, 0.1, 0.2),
+    "color_antenna": (0.6, 0.6, 0.6),
+    "color_sensor": (0.2, 0.2, 0.2),
+}
+
+DOC_NAME = "CubeSat_2U"
+
+# =========================
+# Utilidades
+# =========================
+def ensure_doc(name):
+    doc = App.getDocument(name) if name in App.listDocuments() else App.newDocument(name)
+    Gui.ActiveDocument = Gui.getDocument(doc.Name)
+    return doc
+
+def make_part_container(doc, name):
+    part = doc.addObject("App::Part", name)
+    part.Label = name
+    return part
+
+def add_shape(doc, shape, name, color=None, parent=None):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    obj.Label = name
+    if color is not None:
+        try:
+            obj.ViewObject.ShapeColor = color
+        except Exception:
+            pass
+    if parent is not None:
+        parent.addObject(obj)
+    return obj
+
+def box_solid(L, W, H, pos=(0,0,0)):
+    b = Part.makeBox(L, W, H)
+    b.translate(App.Vector(*pos))
+    return b
+
+def cylinder_solid(r, h, axis="Z", pos=(0,0,0)):
+    if axis == "Z":
+        c = Part.makeCylinder(r, h)
+    elif axis == "X":
+        # hacer Z y rotar a X
+        c = Part.makeCylinder(r, h)
+        c.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif axis == "Y":
+        c = Part.makeCylinder(r, h)
+        c.rotate(App.Vector(0,0,0), App.Vector(1,0,0), 90)
+    else:
+        c = Part.makeCylinder(r, h)
+    c.translate(App.Vector(*pos))
+    return c
+
+def hollow_box(L, W, H, t, fillet_r=0.0):
+    outer = Part.makeBox(L, W, H)
+    if fillet_r > 0:
+        # filete de aristas exteriores
+        edges = outer.Edges
+        outer = outer.makeFillet(fillet_r, edges)
+    inner = Part.makeBox(L - 2*t, W - 2*t, H - 2*t)
+    inner.translate(App.Vector(t, t, t))
+    shell = outer.cut(inner)
+    return shell
+
+# =========================
+# Construcción geométrica
+# =========================
+doc = ensure_doc(DOC_NAME)
+root = make_part_container(doc, "CubeSat_2U")
+
+L, W, H = P["L"], P["W"], P["H"]
+t = P["t_wall"]
+
+# 1) Bus hueco
+bus_shape = hollow_box(L, W, H, t, P["corner_fillet"])
+bus = add_shape(doc, bus_shape, "Bus", P["color_bus"], root)
+
+# 2) Paneles solares
+# Caras candidatas: ±Y (laterales largos) y ±Z (tapas). Usaremos ±Y.
+panel_L = L
+panel_W = H
+panel_T = P["panel_t"]
+gap = P["panel_gap"]
+
+# 2 fijos (adosados a +Y y -Y)
+panel_fixed_pos = [
+    # +Y cara externa
+    (0, W + gap, 0),
+    # -Y cara externa
+    (0, -panel_T - gap, 0),
+]
+panels = []
+for i, pos in enumerate(panel_fixed_pos):
+    shape = box_solid(panel_L, panel_T, panel_W, pos)
+    p = add_shape(doc, shape, f"Panel_Fijo_{i+1}", P["color_panel"], root)
+    panels.append(p)
+
+# 2 desplegables en +Y, uno por cada lado largo; rotados 90° alrededor de eje X
+# Los ubicamos con una bisagra simbólica en el borde superior e inferior.
+hinge_r = P["hinge_r"]
+hinge_len = P["hinge_len"]
+hinge_clear = P["hinge_clear"]
+
+# Superior (cerca de Z=H)
+panel_deploy_top = box_solid(panel_L, panel_T, panel_W, (0, W + gap + panel_T + gap, 0))
+pd1 = add_shape(doc, panel_deploy_top, "Panel_Desplegable_Sup", P["color_panel"], root)
+# Rotamos alrededor del borde superior: eje X a Z=H
+pd1.Placement.Rotation = App.Rotation(App.Vector(1,0,0), 90)
+pd1.Placement.Base = App.Vector(0, W + gap + panel_T + gap, H)
+
+# Inferior (cerca de Z=0)
+panel_deploy_bot = box_solid(panel_L, panel_T, panel_W, (0, W + gap + panel_T + gap, 0))
+pd2 = add_shape(doc, panel_deploy_bot, "Panel_Desplegable_Inf", P["color_panel"], root)
+pd2.Placement.Rotation = App.Rotation(App.Vector(1,0,0), -90)
+pd2.Placement.Base = App.Vector(0, W + gap + panel_T + gap, 0)
+
+# Bisagras (cilindros) visibles
+hinges = []
+# Top hinge a lo largo de X en Y= +Y exterior
+hinge_top = cylinder_solid(hinge_r, hinge_len, axis="X",
+                           pos=( (L - hinge_len)/2.0, W + gap, H - hinge_r*2.0 - hinge_clear ))
+hinge_bot = cylinder_solid(hinge_r, hinge_len, axis="X",
+                           pos=( (L - hinge_len)/2.0, W + gap, hinge_clear ))
+hinges.append(add_shape(doc, hinge_top, "Bisagra_Sup", P["color_antenna"], root))
+hinges.append(add_shape(doc, hinge_bot, "Bisagra_Inf", P["color_antenna"], root))
+
+# 3) Antenas
+# S-band en tapa +Z centrada, hacia +Z
+S_r = P["S_d"]/2.0
+S_len = P["S_len"]
+ant_S = cylinder_solid(S_r, S_len, axis="Z", pos=(L/2.0, W/2.0, H))
+ant_S_obj = add_shape(doc, ant_S, "Antena_S", P["color_antenna"], root)
+
+# X-band como varilla en cara -Z centrada, hacia -Z
+X_r = P["X_d"]/2.0
+X_len = P["X_len"]
+ant_X = cylinder_solid(X_r, X_len, axis="Z", pos=(L/2.0, W/2.0, -X_len))
+ant_X_obj = add_shape(doc, ant_X, "Antena_X", P["color_antenna"], root)
+
+# 4) Sensores en cara nadir (-Z)
+lens_r = P["lens_d"]/2.0
+lens_depth = P["lens_depth"]
+lens_offset = P["lens_offset"]
+
+# Dos lentes a lo largo de X, centrados en Y
+lens1 = cylinder_solid(lens_r, lens_depth, axis="Z",
+                       pos=(L/2.0 - lens_offset, W/2.0, -lens_depth))
+lens2 = cylinder_solid(lens_r, lens_depth, axis="Z",
+                       pos=(L/2.0 + lens_offset, W/2.0, -lens_depth))
+lens1_obj = add_shape(doc, lens1, "Sensor_1", P["color_sensor"], root)
+lens2_obj = add_shape(doc, lens2, "Sensor_2", P["color_sensor"], root)
+
+# 5) Metadatos útiles para FEM
+# Etiquetar materiales esperados mediante propiedades personalizadas
+def tag_material(obj, material_name):
+    try:
+        obj.addProperty("App::PropertyString", "MaterialHint", "FEM", "Material sugerido").MaterialHint = material_name
+    except Exception:
+        pass
+
+aluminum_candidates = [bus] + hinges + [ant_S_obj, ant_X_obj, lens1_obj, lens2_obj]
+for o in aluminum_candidates:
+    tag_material(o, "Aluminium_7075_T6")
+
+panel_candidates = [panels[0], panels[1], pd1, pd2]
+for o in panel_candidates:
+    tag_material(o, "SolarPanel_Composite")
+
+# 6) Colocar el conjunto con origen en esquina (0,0,0); ya está. Agrupar
+doc.recompute()
+Gui.ActiveDocument.ActiveView.fitAll()
+print("CubeSat 2U generado. Ajusta parámetros en P{} y vuelve a ejecutar para modificar.")
+

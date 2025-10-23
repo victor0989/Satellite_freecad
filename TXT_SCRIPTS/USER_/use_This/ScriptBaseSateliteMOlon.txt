@@ -1,0 +1,547 @@
+# -*- coding: utf-8 -*-
+import FreeCAD as App
+import FreeCADGui as Gui
+import Part, math
+
+# ---------- Documento ----------
+DOC_NAME = "CassiniUltra_FullShielded"
+doc = App.ActiveDocument
+if not doc or doc.Label != DOC_NAME:
+    doc = App.newDocument(DOC_NAME)
+App.ActiveDocument = doc
+
+# ---------- Parámetros principales ----------
+P = {
+    "tank_len": 9800.0, "tank_d": 5200.0, "hull_t": 55.0, "hull_outer_d": 6000.0,
+    "liner_t": 22.0, "tps_front_R": 3600.0, "tps_front_t": 160.0, "tps_offset": 680.0,
+    "shoulder_len": 1300.0, "bus_len": 3800.0, "bus_outer_d": 5800.0, "bus_inner_d": 5000.0,
+    "hga_R": 2400.0, "hga_t": 26.0, "hga_offset": 720.0, "hga_mast_len": 1600.0, "hga_mast_d": 240.0,
+    "chamber_len": 3000.0, "chamber_d": 2500.0, "throat_d": 820.0, "exit_d": 5200.0,
+    "nozzle_len": 4200.0, "nozzle_mid_d": 3000.0, "nozzle_mid_x": 1200.0,
+    "gimbal_ring_ro": 2500.0, "gimbal_ring_ri": 2200.0, "gimbal_ring_t": 120.0,
+    "rcs_thr_d": 420.0, "rcs_thr_len": 820.0, "rcs_ring_R": 3400.0, "rcs_count": 8,
+    "aux_thr_d": 1000.0, "aux_thr_len": 1600.0, "aux_thr_ring_R": 3600.0, "aux_thr_count": 8,
+    "solar_len": 5200.0, "solar_w": 1800.0, "solar_t": 95.0, "rad_len": 2800.0,
+    "rad_w": 1100.0, "rad_t": 52.0, "rad_z": 1600.0,
+    "rad_shield_inner_d": 6400.0, "rad_shield_t": 160.0, "rad_shield_len": 6000.0,
+    "whipple_t": 45.0, "whipple_gap": 220.0,
+    "parker_shield_R": 2400.0, "parker_shield_t": 160.0
+}
+
+# ---------- Parámetros adicionales ----------
+P.update({
+    "cupola_R": 2000.0, "cupola_t": 35.0, "cupola_window_w": 420.0, "cupola_window_h": 680.0,
+    "cupola_ring_t": 90.0, "cupola_phase_deg": 15.0, "cupola_windows_n": 8,
+
+    "whipple_layers": 3, "whipple_segment_n": 12,
+    "whipple_bumper_t": 8.0, "whipple_gap": 220.0, "whipple_back_t": 28.0,
+    "whipple_cover_len": 2800.0,
+
+    "pipe_main_d": 160.0, "pipe_ox_d": 140.0, "pipe_fuel_d": 140.0,
+    "pipe_wall_t": 3.0, "pipe_clearance": 180.0, "pipe_offset_phase": 20.0,
+
+    "valve_len": 220.0, "valve_d": 220.0, "reg_len": 240.0,
+    "manifold_d": 520.0, "manifold_len": 700.0,
+
+    "turbopump_len": 820.0, "turbopump_d": 620.0, "volute_d": 720.0,
+
+    "av_bay_len": 1800.0, "av_bay_w": 1400.0, "av_bay_h": 900.0,
+    "rack_w": 480.0, "rack_h": 680.0, "rack_len": 600.0, "rack_count": 8,
+    "battery_len": 600.0, "battery_w": 420.0, "battery_h": 380.0,
+
+    "strut_d": 120.0, "strut_count": 12, "load_ring_t": 120.0,
+    "sensor_mast_len": 1200.0, "sensor_mast_d": 180.0,
+    "tracker_d": 280.0, "tracker_len": 240.0
+})
+
+# ---------- Estados ----------
+STATE = {
+    "flight_stowed": True, "deployed_solar": False, "thermal_test": False,
+    "cupola_enabled": True, "whipple_enabled": True,
+    "feedlines_enabled": True, "turbopump_enabled": True,
+    "avionics_enabled": True, "sensors_enabled": True
+}
+
+# ---------- Materiales ----------
+DENS = {
+    "CFRP": 1600, "Al": 2700, "Ti": 4500, "Cu": 8960,
+    "Glass": 2500, "CeramicTPS": 3200, "CarbonShield": 2000,
+    "Shield": 2000, "PEEK": 1320, "Kevlar": 1440, "Inconel": 8250
+}
+SUBSYS_MAT = {
+    "Tank": "Al", "Liner": "Ti", "Hull": "CFRP", "TPS": "CeramicTPS",
+    "Shield": "CarbonShield", "HGA": "Glass", "Solar": "CFRP",
+    "Radiator": "Al", "RCS": "Ti", "Propulsion": "Ti", "Gimbal": "Ti",
+
+    "Cupola": "CFRP", "CupolaWindow": "Glass",
+    "WhippleBumper": "Kevlar", "WhippleBack": "Al",
+    "Feedlines": "Ti", "Valves": "Ti", "Manifold": "Ti",
+    "Turbopump": "Inconel", "AvionicsBay": "CFRP",
+    "Rack": "Al", "Battery": "Al", "Strut": "Ti",
+    "LoadRing": "Ti", "Sensors": "Al"
+}
+
+MARGIN_MODEL, MARGIN_INTEGRATION = 0.10, 0.05
+mass_rollup = {}
+
+# ---------- Utilidades ----------
+X_AXIS = App.Vector(1, 0, 0)
+Y_AXIS = App.Vector(0, 1, 0)
+ROT_TO_X = App.Rotation(Y_AXIS, 90)
+
+def place_x_aligned(s, L, cx=0, cy=0, cz=0):
+    s.Placement = App.Placement(App.Vector(cx - L / 2, cy, cz), ROT_TO_X)
+
+def add_obj(s, n, c=None):
+    o = doc.addObject("Part::Feature", n)
+    o.Shape = s
+    if c:
+        o.ViewObject.ShapeColor = c
+    return o
+
+def cyl_x(d, L, cx=0, cy=0, cz=0):
+    s = Part.makeCylinder(d / 2, L)
+    place_x_aligned(s, L, cx, cy, cz)
+    return s
+
+def cone_x(d1, d2, L, cx=0, cy=0, cz=0):
+    s = Part.makeCone(d1 / 2, d2 / 2, L)
+    place_x_aligned(s, L, cx, cy, cz)
+    return s
+
+def box_at(l, w, t, x, y, z):
+    b = Part.makeBox(l, w, t)
+    b.translate(App.Vector(x, y, z))
+    return b
+
+def add_group(n):
+    return doc.addObject("App::DocumentObjectGroup", n)
+
+def polar_positions(r, count, cx=0, z=0, phase=0):
+    return [
+        (cx, r * math.cos(math.radians(phase + 360 * i / count)),
+         z + r * math.sin(math.radians(phase + 360 * i / count)))
+        for i in range(count)
+    ]
+
+def mm3_to_m3(v):
+    return v / 1e9
+
+def mass(s, d):
+    return mm3_to_m3(s.Volume) * d
+
+def log_mass_subsys(subsys, s, mat):
+    dens = DENS.get(mat, DENS.get("Al", 2700))
+    m = mass(s, dens)
+    m *= 1 + MARGIN_MODEL + MARGIN_INTEGRATION
+    mass_rollup[subsys] = mass_rollup.get(subsys, 0) + m
+    return m
+
+# ---------- Utilidades de solidez y unión ----------
+def fuse_safe(shapes):
+    if not shapes:
+        return None
+    fused = shapes[0]
+    for s in shapes[1:]:
+        try:
+            fused = fused.fuse(s)
+        except Exception:
+            pass
+    return fused
+
+def thicken_tube(d_outer, t_wall, L, cx=0, cy=0, cz=0):
+    s_out = cyl_x(d_outer, L, cx, cy, cz)
+    s_in  = cyl_x(max(d_outer - 2*t_wall, 1.0), max(L - 2*t_wall, 1.0), cx, cy, cz)
+    return s_out.cut(s_in)
+
+def endcap_plate(d, t, cx, cy, cz):
+    return cyl_x(d, t, cx=cx, cy=cy, cz=cz)
+
+# ---------- Núcleo ----------
+tank_cx = 0
+tank = add_obj(cyl_x(P["tank_d"], P["tank_len"], cx=tank_cx), "Tank", (0.2, 0.6, 1.0))
+liner = add_obj(cyl_x(P["tank_d"] - 2 * P["liner_t"], P["tank_len"] - 2 * P["liner_t"], cx=tank_cx),
+                "TankLiner", (0.15, 0.45, 0.85))
+hull = add_obj(cyl_x(P["hull_outer_d"], P["tank_len"], cx=tank_cx).cut(tank.Shape),
+               "Hull", (0.12, 0.28, 0.5))
+
+cap_center_x = tank_cx + P["tank_len"] / 2 + P["tps_offset"]
+sphere_out = Part.makeSphere(P["tps_front_R"])
+sphere_in = Part.makeSphere(P["tps_front_R"] - P["tps_front_t"])
+for s in (sphere_out, sphere_in):
+    s.Placement = App.Placement(App.Vector(cap_center_x, 0, 0), App.Rotation())
+
+tps_box = Part.makeBox(2 * P["tps_front_R"], 4 * P["tps_front_R"], 4 * P["tps_front_R"],
+                       App.Vector(cap_center_x, -2 * P["tps_front_R"], -2 * P["tps_front_R"]))
+tps_front = add_obj(sphere_out.common(tps_box).cut(sphere_in.common(tps_box)),
+                    "TPS_Front", (0.08, 0.08, 0.08))
+
+# ---------- Escudos Parker + solares multicapa ----------
+parker = add_obj(cyl_x(P["parker_shield_R"] * 2, 200,
+                       cx=cap_center_x + P["tps_offset"] + 200),
+                 "ParkerShield", (0.15, 0.15, 0.20))
+
+def build_solar_shields(P, base_cx):
+    grp = add_group("SolarShields")
+    n_layers = 3
+    shield_R = P["parker_shield_R"] * 1.4
+    shield_t = P["parker_shield_t"] / 2
+    gap = 350
+    for i in range(n_layers):
+        cx = base_cx + i * (shield_t + gap)
+        s = cyl_x(shield_R * 2, shield_t, cx=cx)
+        sh = add_obj(s, f"SolarShield_{i + 1}", (0.85, 0.85, 0.90))
+        grp.addObject(sh)
+        log_mass_subsys("Shield", sh.Shape, "Shield")
+    return grp
+
+solar_shields_grp = build_solar_shields(P, cap_center_x + P["tps_offset"] + 800)
+
+# ---------- Propulsión ----------
+def build_propulsion(P, base_cx):
+    grp = add_group("Propulsion")
+
+    Lc, Dc, Dt, Dm, De, Ln = (
+        P["chamber_len"], P["chamber_d"], P["throat_d"],
+        P["nozzle_mid_d"], P["exit_d"], P["nozzle_len"]
+    )
+
+    chamber = add_obj(cyl_x(Dc, Lc, cx=base_cx), "Chamber", (0.55, 0.55, 0.6))
+    grp.addObject(chamber)
+    log_mass_subsys("Propulsion", chamber.Shape, "Propulsion")
+
+    conv_len = 0.25 * Ln
+    conv_cx = base_cx + Lc / 2 + conv_len / 2
+    conv = add_obj(cone_x(Dc, Dt, conv_len, cx=conv_cx),
+                   "NozzleConverging", (0.5, 0.5, 0.55))
+    grp.addObject(conv)
+    log_mass_subsys("Propulsion", conv.Shape, "Propulsion")
+
+    div1_len = 0.35 * Ln
+    div1_cx = conv_cx + conv_len / 2 + div1_len / 2
+    div1 = add_obj(cone_x(Dt, Dm, div1_len, cx=div1_cx),
+                   "NozzleDiverging1", (0.48, 0.48, 0.52))
+    grp.addObject(div1)
+    log_mass_subsys("Propulsion", div1.Shape, "Propulsion")
+
+    div2_len = max(Ln - (conv_len + div1_len), 600.0)
+    div2_cx = div1_cx + div1_len / 2 + div2_len / 2
+    div2 = add_obj(cone_x(Dm, De, div2_len, cx=div2_cx),
+                   "NozzleDiverging2", (0.46, 0.46, 0.50))
+    grp.addObject(div2)
+    log_mass_subsys("Propulsion", div2.Shape, "Propulsion")
+
+    ring = add_obj(
+        cyl_x(P["gimbal_ring_ro"] * 2, P["gimbal_ring_t"], cx=div1_cx)
+        .cut(cyl_x(P["gimbal_ring_ri"] * 2, P["gimbal_ring_t"], cx=div1_cx)),
+        "GimbalRing", (0.72, 0.72, 0.75)
+    )
+    grp.addObject(ring)
+    log_mass_subsys("Gimbal", ring.Shape, "Gimbal")
+
+    return grp, div2_cx + div2_len / 2
+
+# ---------- RCS ----------
+def build_rcs(P, center_x):
+    grp = add_group("RCS")
+    for i, (cx, cy, cz) in enumerate(polar_positions(P["rcs_ring_R"], P["rcs_count"], center_x)):
+        thr = add_obj(cyl_x(P["rcs_thr_d"], P["rcs_thr_len"], cx=cx, cy=cy, cz=cz),
+                      f"RCS_{i + 1}", (0.65, 0.65, 0.70))
+        grp.addObject(thr)
+        log_mass_subsys("RCS", thr.Shape, "RCS")
+    return grp
+
+# ---------- Paneles solares + radiadores ----------
+def build_solar_and_radiators(P, anchor_x, side="port"):
+    grp = add_group(f"SolarRadiator_{side}")
+    side_sign = -1 if side == "port" else 1
+
+    sol = add_obj(
+        box_at(P["solar_len"], P["solar_w"], P["solar_t"],
+               anchor_x - P["solar_len"] / 2,
+               side_sign * (P["bus_outer_d"] / 2 + P["solar_w"] / 2 + 200),
+               -P["solar_t"] / 2),
+        f"Solar_{side}", (0.2, 0.35, 0.5)
+    )
+    grp.addObject(sol)
+    log_mass_subsys("Solar", sol.Shape, "Solar")
+
+    rad = add_obj(
+        box_at(P["rad_len"], P["rad_w"], P["rad_t"],
+               anchor_x - P["rad_len"] / 2,
+               side_sign * (P["bus_outer_d"] / 2 + P["rad_w"] / 2 + 300),
+               P["rad_z"]),
+        f"Radiator_{side}", (0.75, 0.78, 0.82)
+    )
+    grp.addObject(rad)
+    log_mass_subsys("Radiator", rad.Shape, "Radiator")
+
+    return grp
+
+# ---------- Cúpula sólida preparada para FEM ----------
+def build_cupola_solid(P, base_cx, outer_d):
+    grp = add_group("CupolaSolid")
+    R = P["cupola_R"]; t = P["cupola_t"]
+
+    hemi_out_full = Part.makeSphere(R); hemi_out_full.Placement = App.Placement(App.Vector(base_cx, 0, 0), App.Rotation())
+    hemi_out = hemi_out_full.common(Part.makeBox(2*R, 2*R, R, App.Vector(base_cx, -R, 0)))
+    hemi_in_full = Part.makeSphere(R - t); hemi_in_full.Placement = App.Placement(App.Vector(base_cx, 0, 0), App.Rotation())
+    hemi_in  = hemi_in_full.common(Part.makeBox(2*(R - t), 2*(R - t), R - t, App.Vector(base_cx, -(R - t), 0)))
+    shell = hemi_out.cut(hemi_in)
+
+    ring_t = P["cupola_ring_t"]
+    ring_outer = cyl_x(outer_d, ring_t, cx=base_cx - ring_t/2)
+    ring_inner = cyl_x(max(outer_d - 2*P["strut_d"], 10.0), ring_t, cx=base_cx - ring_t/2)
+    ring = ring_outer.cut(ring_inner)
+
+    n = P["cupola_windows_n"]; w = P["cupola_window_w"]; h = P["cupola_window_h"]; phase = P["cupola_phase_deg"]
+    cutouts = []
+    for (cx, cy, cz) in polar_positions(R - t/2, n, base_cx + t, z=0, phase=phase):
+        cutouts.append(box_at(t*1.6, w, h, cx - t*1.6, cy - w/2, cz - h/2))
+    shell_with_windows = shell
+    for c in cutouts:
+        try:
+            shell_with_windows = shell_with_windows.cut(c)
+        except Exception:
+            pass
+
+    cup_solid = fuse_safe([shell_with_windows, ring])
+    cup_obj = add_obj(cup_solid, "CupolaShellSolid", (0.18, 0.22, 0.28)); grp.addObject(cup_obj)
+    log_mass_subsys("Cupola", cup_obj.Shape, "Cupola")
+
+    return grp, cup_solid
+
+# ---------- Escudo Whipple multicapa ----------
+def build_whipple_shield(P, front_cx, outer_d):
+    grp = add_group("WhippleShield")
+    cover_len = P["whipple_cover_len"]
+
+    bumper_t = P["whipple_bumper_t"]
+    gap = P["whipple_gap"]
+    back_t = P["whipple_back_t"]
+
+    bumper = cyl_x(outer_d + 400.0, bumper_t, cx=front_cx - bumper_t/2)
+    bumper_obj = add_obj(bumper, "WhippleBumper", (0.85, 0.86, 0.70))
+    grp.addObject(bumper_obj)
+    log_mass_subsys("WhippleBumper", bumper_obj.Shape, "WhippleBumper")
+
+    back = cyl_x(outer_d + 250.0, back_t, cx=front_cx - bumper_t - gap - back_t/2)
+    back_obj = add_obj(back, "WhippleBackplate", (0.75, 0.76, 0.80))
+    grp.addObject(back_obj)
+    log_mass_subsys("WhippleBack", back_obj.Shape, "WhippleBack")
+
+    skirt = cyl_x(outer_d + 250.0, cover_len, cx=front_cx - bumper_t - gap - back_t - cover_len/2)
+    skirt_obj = add_obj(skirt, "WhippleSkirt", (0.70, 0.72, 0.76))
+    grp.addObject(skirt_obj)
+    log_mass_subsys("WhippleBack", skirt_obj.Shape, "WhippleBack")
+
+    return grp
+
+# ---------- Líneas de propelente y válvulas ----------
+def build_feedlines(P, tank_cx, engine_cx):
+    grp = add_group("Feedlines")
+    phases = [P["pipe_offset_phase"], 180 - P["pipe_offset_phase"]]
+    diameters = [P["pipe_ox_d"], P["pipe_fuel_d"]]
+    labels = ["OX", "FUEL"]
+    for i, phase in enumerate(phases):
+        cx, cy, cz = polar_positions(P["bus_outer_d"]/2 + P["pipe_clearance"], 1, tank_cx, z=0, phase=phase)[0]
+        L = engine_cx - tank_cx
+        pipe = thicken_tube(d_outer=diameters[i], t_wall=P["pipe_wall_t"], L=L, cx=(tank_cx + engine_cx)/2, cy=cy, cz=cz)
+        pipe_obj = add_obj(pipe, f"Pipe_{labels[i]}", (0.60, 0.62, 0.66))
+        grp.addObject(pipe_obj)
+        log_mass_subsys("Feedlines", pipe_obj.Shape, "Feedlines")
+
+        val = add_obj(cyl_x(P["valve_d"], P["valve_len"], cx=engine_cx - P["valve_len"]/2, cy=cy, cz=cz), f"Valve_{labels[i]}", (0.55, 0.57, 0.60))
+        grp.addObject(val)
+        log_mass_subsys("Valves", val.Shape, "Valves")
+
+    man = add_obj(cyl_x(P["manifold_d"], P["manifold_len"], cx=engine_cx - P["manifold_len"]/2, cy=0, cz=-P["bus_outer_d"]/4), "Manifold", (0.50, 0.52, 0.56))
+    grp.addObject(man)
+    log_mass_subsys("Manifold", man.Shape, "Manifold")
+
+    return grp
+
+# ---------- Turbobomba sólida ----------
+def build_turbopump_solid(P, attach_cx, bus_outer_d):
+    grp = add_group("TurbopumpSolid")
+    base_z = -bus_outer_d/5
+
+    body = cyl_x(P["turbopump_d"], P["turbopump_len"], cx=attach_cx - P["turbopump_len"]/2, cy=0, cz=base_z)
+    volute = cyl_x(P["volute_d"], P["turbopump_len"]/3, cx=attach_cx - P["turbopump_len"]/1.5, cy=P["volute_d"]/2, cz=base_z)
+    flange = endcap_plate(P["turbopump_d"]*0.9, P["turbopump_len"]*0.12, cx=attach_cx - P["turbopump_len"]*0.06, cy=0, cz=base_z)
+
+    tp_solid = fuse_safe([body, volute, flange])
+    tp_obj = add_obj(tp_solid, "TurbopumpSolid", (0.45, 0.46, 0.50)); grp.addObject(tp_obj)
+    log_mass_subsys("Turbopump", tp_obj.Shape, "Turbopump")
+
+    return grp, tp_solid
+
+# ---------- Aviónica satelital sólida y backbone ----------
+def build_avionics_sat_solid(P, bus_cx):
+    grp = add_group("AvionicsSatSolid")
+
+    bay = box_at(P["av_bay_len"], P["av_bay_w"], P["av_bay_h"],
+                 bus_cx - P["av_bay_len"]/2, P["bus_outer_d"]/2 + 200, -P["av_bay_h"]/2)
+    bay_obj = add_obj(bay, "AvionicsBaySolid", (0.22, 0.28, 0.36)); grp.addObject(bay_obj)
+    log_mass_subsys("AvionicsBay", bay_obj.Shape, "AvionicsBay")
+
+    solids = [bay]
+
+    bb = box_at(P["av_bay_len"]*1.1, P["rack_w"]*0.8, P["rack_h"]*0.25,
+                bus_cx - (P["av_bay_len"]*1.1)/2, P["bus_outer_d"]/2 + 200, -P["rack_h"])
+    bb_obj = add_obj(bb, "AvBackbone", (0.30, 0.34, 0.40)); grp.addObject(bb_obj)
+    log_mass_subsys("Rack", bb_obj.Shape, "Rack")
+    solids.append(bb)
+
+    rows = 2
+    per_row = max(P["rack_count"]//rows, 3)
+    spacing_w = P["av_bay_w"]/rows
+    for r in range(rows):
+        row_y = P["bus_outer_d"]/2 + 200 + (-P["av_bay_w"]/2 + spacing_w*(r+0.5))
+        for i in range(per_row):
+            col_x = bus_cx - P["rack_len"]/2 + (i - per_row/2 + 0.5)* (P["rack_len"]*0.9)
+            rack = box_at(P["rack_len"], P["rack_w"], P["rack_h"], col_x, row_y, -P["rack_h"]/2)
+            rack_obj = add_obj(rack, f"SatRack_{r+1}_{i+1}", (0.72, 0.74, 0.78)); grp.addObject(rack_obj)
+            log_mass_subsys("Rack", rack_obj.Shape, "Rack")
+            solids.append(rack)
+
+    for lvl in [0.3, 0.65]:
+        tray = box_at(P["av_bay_len"]*0.9, P["av_bay_w"]*0.9, P["solar_t"]*1.2,
+                      bus_cx - (P["av_bay_len"]*0.9)/2, P["bus_outer_d"]/2 + 200, -P["av_bay_h"]*lvl)
+        tray_obj = add_obj(tray, f"AvTray_{int(lvl*100)}", (0.26, 0.30, 0.36)); grp.addObject(tray_obj)
+        log_mass_subsys("Rack", tray_obj.Shape, "Rack")
+        solids.append(tray)
+
+    for k in range(4):
+        bx = bus_cx - P["battery_len"]/2 + k*(P["battery_len"]*1.05) - P["battery_len"]
+        batt = box_at(P["battery_len"], P["battery_w"], P["battery_h"], bx, -P["bus_outer_d"]/2 - 200, -P["battery_h"]/2)
+        batt_obj = add_obj(batt, f"BatteryEPS_{k+1}", (0.80, 0.78, 0.70)); grp.addObject(batt_obj)
+        log_mass_subsys("Battery", batt_obj.Shape, "Battery")
+        solids.append(batt)
+
+    av_solid = fuse_safe(solids)
+    if av_solid:
+        av_master = add_obj(av_solid, "AvionicsSatMasterSolid", (0.24, 0.30, 0.38))
+        grp.addObject(av_master)
+
+    return grp, av_solid
+
+# ---------- Sensores y mástiles ----------
+def build_sensors(P, nose_cx):
+    grp = add_group("Sensors")
+    mast = add_obj(cyl_x(P["sensor_mast_d"], P["sensor_mast_len"], cx=nose_cx - P["sensor_mast_len"]/2, cy=0, cz=P["cupola_R"]*0.6), "SensorMast", (0.40, 0.42, 0.46))
+    grp.addObject(mast)
+    log_mass_subsys("Sensors", mast.Shape, "Sensors")
+
+    for i, (cx, cy, cz) in enumerate(polar_positions(P["cupola_R"]*0.6, 3, nose_cx, z=P["cupola_R"]*0.6, phase=20)):
+        tracker = add_obj(cyl_x(P["tracker_d"], P["tracker_len"], cx=cx - P["tracker_len"]/2, cy=cy, cz=cz), f"StarTracker_{i+1}", (0.66, 0.70, 0.76))
+        grp.addObject(tracker)
+        log_mass_subsys("Sensors", tracker.Shape, "Sensors")
+
+    return grp
+
+# ---------- Soportes estructurales radiales sólidos ----------
+def build_struct_supports_solid(P, front_cx, outer_d):
+    grp = add_group("StructuralSupportsSolid")
+
+    ring_t = P["cupola_ring_t"]
+    load_ring_outer = cyl_x(outer_d, ring_t, cx=front_cx - ring_t/2)
+    load_ring_inner = cyl_x(max(outer_d - 2*P["strut_d"], 10.0), ring_t, cx=front_cx - ring_t/2)
+    load_ring = load_ring_outer.cut(load_ring_inner)
+    ring_obj = add_obj(load_ring, "LoadRingMain", (0.35, 0.36, 0.40))
+    grp.addObject(ring_obj)
+    log_mass_subsys("LoadRing", ring_obj.Shape, "LoadRing")
+
+    strut_len = P["cupola_R"]
+    strut_d   = P["strut_d"]
+    node_t    = max(strut_d*0.35, 40.0)
+    node_d    = max(strut_d*1.8, 180.0)
+
+    struts_shapes = [load_ring]
+    for i, (cx, cy, cz) in enumerate(polar_positions(outer_d/2, P["strut_count"], front_cx - ring_t, z=0, phase=0)):
+        bar = thicken_tube(d_outer=strut_d, t_wall=strut_d*0.25, L=strut_len, cx=cx - strut_len/2, cy=cy, cz=cz)
+        plate_root = endcap_plate(node_d, node_t, cx=front_cx - ring_t - node_t/2, cy=cy, cz=cz)
+        plate_tip  = endcap_plate(node_d*0.85, node_t*0.85, cx=cx - strut_len - node_t/2, cy=cy, cz=cz)
+
+        strut_obj = add_obj(bar, f"Strut_{i+1}", (0.50, 0.50, 0.52))
+        root_obj  = add_obj(plate_root, f"StrutRoot_{i+1}", (0.48, 0.48, 0.50))
+        tip_obj   = add_obj(plate_tip,  f"StrutTip_{i+1}",  (0.48, 0.48, 0.50))
+        grp.addObject(strut_obj); grp.addObject(root_obj); grp.addObject(tip_obj)
+
+        log_mass_subsys("Strut", strut_obj.Shape, "Strut")
+        log_mass_subsys("Strut", root_obj.Shape, "Strut")
+        log_mass_subsys("Strut", tip_obj.Shape, "Strut")
+
+        struts_shapes.extend([bar, plate_root, plate_tip])
+
+    lattice_shapes = []
+    phases = [0, 30, 60, 90]
+    for ph in phases:
+        for (cx, cy, cz) in polar_positions(outer_d/2 * 0.85, P["strut_count"], front_cx - ring_t - node_t, z=0, phase=ph):
+            rib = thicken_tube(d_outer=strut_d*0.65, t_wall=strut_d*0.20, L=node_d*1.2, cx=cx - node_d*0.6, cy=cy, cz=cz)
+            rib_obj = add_obj(rib, f"LatticeRib_{ph}_{int(cy)}", (0.52, 0.52, 0.54))
+            grp.addObject(rib_obj)
+            log_mass_subsys("Strut", rib_obj.Shape, "Strut")
+            lattice_shapes.append(rib)
+
+    struct_solid = fuse_safe(struts_shapes + lattice_shapes)
+    if struct_solid:
+        solid_obj = add_obj(struct_solid, "StructuralSolid", (0.44, 0.46, 0.50))
+        grp.addObject(solid_obj)
+
+    return grp, struct_solid
+
+# ---------- Construcción extendida con sólidos ----------
+prop_grp, aft_x = build_propulsion(P, base_cx=tank_cx + P["tank_len"]/2 + 600)
+rcs_grp = build_rcs(P, center_x=tank_cx)
+sr_port = build_solar_and_radiators(P, anchor_x=tank_cx, side="port")
+sr_star = build_solar_and_radiators(P, anchor_x=tank_cx, side="starboard")
+
+front_cx = tank_cx + P["tank_len"]/2 + P["tps_offset"]
+outer_d  = P["hull_outer_d"]
+
+cupola_grp, cupola_solid = build_cupola_solid(P, base_cx=front_cx, outer_d=outer_d) if STATE.get("cupola_enabled") else (None, None)
+whipple_grp = build_whipple_shield(P, front_cx=front_cx, outer_d=outer_d) if STATE.get("whipple_enabled") else None
+feed_grp = build_feedlines(P, tank_cx=tank_cx, engine_cx=aft_x) if STATE.get("feedlines_enabled") else None
+turbopump_grp, turbopump_solid = build_turbopump_solid(P, attach_cx=aft_x, bus_outer_d=P["bus_outer_d"]) if STATE.get("turbopump_enabled") else (None, None)
+avionics_grp, avionics_solid = build_avionics_sat_solid(P, bus_cx=tank_cx) if STATE.get("avionics_enabled") else (None, None)
+sensors_grp = build_sensors(P, nose_cx=front_cx) if STATE.get("sensors_enabled") else None
+struct_grp, struct_solid = build_struct_supports_solid(P, front_cx=front_cx, outer_d=outer_d)
+
+# ---------- MasterSolid para FEM ----------
+master_parts = []
+for obj in [hull.Shape, cupola_solid, turbopump_solid, avionics_solid, struct_solid]:
+    if obj:
+        master_parts.append(obj)
+
+master_solid = fuse_safe(master_parts)
+master_obj = None
+if master_solid:
+    master_obj = add_obj(master_solid, "MasterSolid_FEM", (0.60, 0.55, 0.65))
+
+# ---------- Agrupación total ----------
+system_grp = add_group("CassiniUltra_System")
+for g in (tank, liner, hull, tps_front, parker, solar_shields_grp,
+          prop_grp, rcs_grp, sr_port, sr_star,
+          cupola_grp, whipple_grp, feed_grp, turbopump_grp,
+          avionics_grp, sensors_grp, struct_grp, master_obj):
+    if g:
+        try:
+            system_grp.addObject(g)
+        except Exception:
+            pass
+
+# ---------- Resumen de masas ----------
+print("\n---- Subsystem Mass Rollup (kg, with margins) ----")
+total_subsys = 0.0
+for k, v in sorted(mass_rollup.items()):
+    print(f"{k:20s} {v:10.2f}")
+    total_subsys += v
+print(f"Total subsystems (with margins): {total_subsys:.2f} kg")
+print(f"Core + subsystems total (approx): {total_subsys:.2f} kg")
+
+# ---------- Vista ----------
+doc.recompute()
+if Gui.ActiveDocument:
+    Gui.ActiveDocument.ActiveView.viewAxonometric()
+    Gui.SendMsgToActiveView("ViewFit")

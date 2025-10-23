@@ -1,0 +1,87 @@
+# -*- coding: utf-8 -*-
+# FreeCAD Macro: Cohete Comercial Eco-Friendly
+# Autor: Víctor Alonso García + GPT-5
+# Descripción: Modelo paramétrico de cohete sostenible
+
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc = App.newDocument("EcoRocket")
+grp = doc.addObject("App::DocumentObjectGroup","Rocket")
+
+# =========================
+# Parámetros principales
+# =========================
+P = {
+    "stage1_len": 25000.0,
+    "stage1_d": 4000.0,
+    "stage2_len": 12000.0,
+    "stage2_d": 3000.0,
+    "fairing_len": 6000.0,
+    "fairing_d": 3500.0,
+    "tank_wall": 40.0,
+    "engine_d": 2500.0,
+    "engine_len": 8000.0,
+    "leg_len": 7000.0,
+    "leg_d": 300.0,
+    "strut_d": 200.0,
+    "strut_n": 8,
+}
+
+# =========================
+# Funciones utilitarias
+# =========================
+def cyl_z(d,L,cx=0,cy=0,cz=0):
+    return Part.makeCylinder(d/2.0,L,App.Vector(cx,cy,cz),App.Vector(0,0,1))
+
+def cone_z(d1,d2,L,cx=0,cy=0,cz=0):
+    return Part.makeCone(d1/2.0,d2/2.0,L,App.Vector(cx,cy,cz),App.Vector(0,0,1))
+
+def add_obj(shape,label,color_rgb=(0.7,0.7,0.7)):
+    obj = doc.addObject("Part::Feature",label)
+    obj.Shape = shape
+    obj.ViewObject.ShapeColor = color_rgb
+    grp.addObject(obj)
+    return obj
+
+# =========================
+# Etapa 1 (tanque grande + faldón)
+# =========================
+stage1 = cyl_z(P["stage1_d"],P["stage1_len"])
+add_obj(stage1,"Stage1",(0.7,0.7,0.9))
+
+# Faldón inferior
+skirt = cone_z(P["stage1_d"],P["engine_d"],2000,cz=-2000)
+add_obj(skirt,"Skirt",(0.5,0.5,0.5))
+
+# =========================
+# Etapa 2 (segundo tanque + motor)
+# =========================
+stage2 = cyl_z(P["stage2_d"],P["stage2_len"],cz=P["stage1_len"])
+add_obj(stage2,"Stage2",(0.9,0.7,0.7))
+
+# Adaptador inter-etapa
+adapter = cone_z(P["stage1_d"],P["stage2_d"],2000,cz=P["stage1_len"])
+add_obj(adapter,"Interstage",(0.6,0.6,0.6))
+
+# Motor principal
+engine = cone_z(P["engine_d"],P["engine_d"]/5,P["engine_len"],cz=-P["engine_len"])
+add_obj(engine,"MainEngine",(0.4,0.4,0.4))
+
+# =========================
+# Fairing (cúpula superior)
+# =========================
+fairing = cone_z(P["fairing_d"],100.0,P["fairing_len"],cz=P["stage1_len"]+P["stage2_len"])
+add_obj(fairing,"Fairing",(0.85,0.85,0.85))
+
+# =========================
+# Tren de aterrizaje (Stage 1)
+# =========================
+for i in range(P["strut_n"]):
+    ang = 360.0 * i / P["strut_n"]
+    x = (P["stage1_d"]/2.0) * math.cos(math.radians(ang))
+    y = (P["stage1_d"]/2.0) * math.sin(math.radians(ang))
+    leg = cyl_z(P["leg_d"],P["leg_len"],cx=x,cy=y,cz=-P["leg_len"])
+    add_obj(leg,f"LandingLeg_{i+1}",(0.3,0.3,0.3))
+
+doc.recompute()
+Gui.SendMsgToActiveView("ViewFit")

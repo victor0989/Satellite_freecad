@@ -1,0 +1,288 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name = "Quantum_Ion_Drive_Super"
+if App.ActiveDocument is None or App.ActiveDocument.Label != doc_name:
+    App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# ---------------- PARÁMETROS ----------------
+P = {
+    "fuel": "H2",
+    # Carcasa
+    "nose_len": 600, "nose_base_d": 1000,
+    "mid_len": 2000, "mid_d": 2000,
+    "rear_len": 1500, "rear_d": 2200, "hull_t": 25,
+    # Reactor
+    "reactor_d": 1600, "reactor_l": 1800, "reactor_cx": 3000,
+    # Anillos concéntricos
+    "ring_h": 50, "ring_ro": 1200, "ring_ri": 1100, "ring_n": 20, "ring_pitch": 120,
+    # Bobinas tokamak
+    "coil_R": 1200, "coil_rect_w": 120, "coil_rect_h": 120, "coil_n": 14, "coil_span": 1800,
+    # Tobera
+    "nozzle_throat_d": 500, "nozzle_exit_d": 1800, "nozzle_l": 1800, "nozzle_cx": 3800,
+    # Sensores
+    "sensor_enable": True, "sensor_d": 60, "sensor_l": 60,
+    # Inyectores y tuberías
+    "injector_n": 16, "pipe_d": 80, "pipe_l": 1000,
+    # Blindaje
+    "shield_enable": True, "shield_t": 50,
+    # Turbinas internas
+    "turbine_n": 4, "turbine_d": 200, "turbine_l": 300,
+    # Helix refrigerante
+    "cool_pitch": 200, "cool_offset": 150,
+    # Tanques criogénicos
+    "fuel_tank_d": 800, "fuel_tank_l": 1200, "fuel_tank_cx": 2500, "fuel_tank_cz": 1200,
+    "ox_tank_d": 700, "ox_tank_l": 1000, "ox_tank_cx": 2500, "ox_tank_cz": -1200,
+    "he_tank_d": 400, "he_tank_l": 800, "he_tank_cx": 2000, "he_tank_cz": 0,
+    # RCS clusters
+    "rcs_n": 4, "rcs_radius": 2500, "rcs_len": 150, "rcs_d1": 100, "rcs_d2": 50, "rcs_cx": 4500,
+    # Bipods
+    "bipod_d": 80, "bipod_len": 1600, "bipod_span_y": 700, "bipod_angle_deg": 35,
+    # Sombrillas térmicas
+    "shade_n": 3, "shade_d": 1800, "shade_t": 15, "shade_spacing": 180, "shade_cx": 2200
+}
+
+# Ajuste Xe
+if P["fuel"] == "Xe":
+    P.update({
+        "reactor_d": 2000, "reactor_l": 2200, "coil_n": 18,
+        "nozzle_throat_d": 400, "nozzle_exit_d": 1600, "pipe_d": 100, "pipe_l": 1200
+    })
+
+# ---------------- UTILIDADES ----------------
+X_AXIS = App.Vector(1, 0, 0)
+Y_AXIS = App.Vector(0, 1, 0)
+Z_AXIS = App.Vector(0, 0, 1)
+
+def rot_to_x():
+    return App.Rotation(Y_AXIS, 90)
+
+def add_obj(s, label):
+    o = doc.addObject("Part::Feature", label)
+    o.Shape = s
+    return o
+
+def make_cyl_x(d, L, cx=0, cy=0, cz=0, l="CylX"):
+    c = Part.makeCylinder(d/2, L)
+    c.Placement = App.Placement(App.Vector(cx - L/2, cy, cz), rot_to_x())
+    return add_obj(c, l)
+
+def make_cone_x(d1, d2, L, cx=0, cy=0, cz=0, l="ConeX"):
+    c = Part.makeCone(d1/2, d2/2, L)
+    c.Placement = App.Placement(App.Vector(cx - L/2, cy, cz), rot_to_x())
+    return add_obj(c, l)
+
+def make_hollow(o, t, l="Shell"):
+    try:
+        i = o.makeOffsetShape(-t, 0.01, join=2, fill=True)
+        return add_obj(o.cut(i), l)
+    except:
+        return add_obj(o, l + "_f")
+
+# ---------------- CONSTRUCCIÓN BASE ----------------
+# Carcasa externa
+nose = make_cone_x(P["nose_base_d"], 0, P["nose_len"], cx=P["nose_len"]/2, l="Nose")
+mid  = make_cyl_x(P["mid_d"], P["mid_len"], cx=P["nose_len"] + P["mid_len"]/2, l="Mid")
+rear = make_cyl_x(P["rear_d"], P["rear_len"], cx=P["nose_len"] + P["mid_len"] + P["rear_len"]/2, l="Rear")
+hull = make_hollow(nose.Shape.fuse(mid.Shape).fuse(rear.Shape), P["hull_t"], l="Hull")
+
+# Reactor
+reactor_outer = make_cyl_x(P["reactor_d"], P["reactor_l"], cx=P["reactor_cx"], l="ReactorOuter")
+reactor_inner_cyl = Part.makeCylinder((P["reactor_d"] - 50)/2, P["reactor_l"] - 50)
+reactor_inner_cyl.Placement = App.Placement(App.Vector(P["reactor_cx"] - P["reactor_l"]/2 + 25, 0, 0), rot_to_x())
+reactor_inner = add_obj(reactor_inner_cyl, "ReactorInner")
+reactor = make_hollow(reactor_outer.Shape, 25, "Reactor")
+
+# Anillos concéntricos
+rings = []
+x0 = P["reactor_cx"] - P["reactor_l"]/2 + P["ring_h"]/2
+for i in range(P["ring_n"]):
+    x = x0 + i * P["ring_pitch"]
+    r = Part.makeTorus((P["ring_ro"] + P["ring_ri"]) / 2, (P["ring_ro"] - P["ring_ri"]) / 2)
+    r.Placement = App.Placement(App.Vector(x, 0, 0), rot_to_x())
+    rings.append(r)
+rS = rings[0]
+for r in rings[1:]:
+    rS = rS.fuse(r)
+rings_obj = add_obj(rS, "Rings")
+
+# Bobinas tipo tokamak
+coils = []
+cx0 = P["reactor_cx"] - P["coil_span"]/2
+for i in range(P["coil_n"]):
+    cx = cx0 + i * (P["coil_span"] / (P["coil_n"] - 1))
+    radius = P["coil_R"] * (1 + 0.05 * math.sin(i))
+    coil = Part.makeTorus(radius, P["coil_rect_w"]/2)
+    coil.Placement = App.Placement(App.Vector(cx, 0, 0), rot_to_x())
+    coils.append(coil)
+cS = coils[0]
+for c in coils[1:]:
+    cS = cS.fuse(c)
+coils_obj = add_obj(cS, "Coils")
+
+# Inyectores internos
+bars = []
+for i in range(P["injector_n"]):
+    angle = i * (360 / P["injector_n"])
+    r = (P["ring_ro"] + P["ring_ri"]) / 2
+    y = r * math.cos(math.radians(angle))
+    z = r * math.sin(math.radians(angle))
+    bar = Part.makeCylinder(30, P["reactor_l"] * 0.8)
+    bar.Placement = App.Placement(App.Vector(P["reactor_cx"] - P["reactor_l"]/2, y, z), rot_to_x())
+    bars.append(bar)
+bS = bars[0]
+for b in bars[1:]:
+    bS = bS.fuse(b)
+bars_obj = add_obj(bS, "Injectors")
+
+# Tuberías de combustible y refrigeración (radiales)
+pipes = []
+for i in range(P["injector_n"]):
+    angle = i * (360 / P["injector_n"])
+    r = (P["ring_ro"] + P["ring_ri"]) / 2 + 60
+    y = r * math.cos(math.radians(angle))
+    z = r * math.sin(math.radians(angle))
+    pipe = make_cyl_x(P["pipe_d"], P["pipe_l"], cx=P["reactor_cx"] - P["pipe_l"]/2, cy=y, cz=z, l=f"Pipe{i+1}")
+    pipes.append(pipe)
+
+# Turbinas internas
+turbines = []
+for i in range(P["turbine_n"]):
+    angle = i * (360 / P["turbine_n"])
+    r = (P["reactor_d"]/2 - 50)
+    y = r * math.cos(math.radians(angle))
+    z = r * math.sin(math.radians(angle))
+    turb = make_cyl_x(P["turbine_d"], P["turbine_l"], cx=P["reactor_cx"] + i*50, cy=y, cz=z, l=f"Turbine{i+1}")
+    turbines.append(turb)
+
+# Tobera principal
+def make_nozzle():
+    noz = Part.makeCone(P["nozzle_throat_d"]/2, P["nozzle_exit_d"]/2, P["nozzle_l"])
+    noz.Placement = App.Placement(App.Vector(P["nozzle_cx"] - P["nozzle_l"]/2, 0, 0), rot_to_x())
+    return add_obj(noz, "Nozzle")
+noz_obj = make_nozzle()
+
+# Sensores
+sensor_objs = []
+if P["sensor_enable"]:
+    for i in range(6):
+        sensor = make_cyl_x(P["sensor_d"], P["sensor_l"],
+                            cx=P["reactor_cx"] + i*120,
+                            cy=0,
+                            cz=500 - i*50,
+                            l=f"Sensor{i+1}")
+        sensor_objs.append(sensor)
+
+# Blindaje externo
+shield_obj = None
+if P["shield_enable"]:
+    shield_outer = make_cyl_x(P["reactor_d"] + 2*P["shield_t"],
+                              P["reactor_l"] + 2*P["shield_t"],
+                              cx=P["reactor_cx"],
+                              cy=0,
+                              cz=0,
+                              l="ShieldOuter")
+    shield_obj = make_hollow(shield_outer.Shape, P["shield_t"], l="Shield_Hollow")
+
+# ---------------- SUBSISTEMAS CASSINI-LIKE ----------------
+# Tanques criogénicos
+fuel_tank = Part.makeCylinder(P["fuel_tank_d"]/2, P["fuel_tank_l"])
+fuel_tank.Placement = App.Placement(App.Vector(P["fuel_tank_cx"] - P["fuel_tank_l"]/2, 0, P["fuel_tank_cz"]), rot_to_x())
+
+ox_tank = Part.makeCylinder(P["ox_tank_d"]/2, P["ox_tank_l"])
+ox_tank.Placement = App.Placement(App.Vector(P["ox_tank_cx"] - P["ox_tank_l"]/2, 0, P["ox_tank_cz"]), rot_to_x())
+
+he_tank = Part.makeCylinder(P["he_tank_d"]/2, P["he_tank_l"])
+he_tank.Placement = App.Placement(App.Vector(P["he_tank_cx"] - P["he_tank_l"]/2, 0, P["he_tank_cz"]), rot_to_x())
+
+# Helix refrigerante alrededor del reactor
+helix = Part.makeHelix(P["cool_pitch"], P["reactor_l"], P["reactor_d"]/2 + P["cool_offset"])
+profile = Part.makeCircle(P["pipe_d"]/2)
+# Convertimos helix a Wire antes de sweep
+helix_wire = Part.Wire(helix)
+sweep = helix_wire.makePipeShell([profile], True, True)
+
+# RCS clusters (conos pequeños)
+rcs_thrusters = []
+for i in range(P["rcs_n"]):
+    angle = i * (360 / P["rcs_n"])
+    y = P["rcs_radius"] * math.cos(math.radians(angle))
+    z = P["rcs_radius"] * math.sin(math.radians(angle))
+    thr = Part.makeCone(P["rcs_d1"]/2, P["rcs_d2"]/2, P["rcs_len"])
+    thr.Placement = App.Placement(App.Vector(P["rcs_cx"] - P["rcs_len"]/2, y, z), rot_to_x())
+    rcs_thrusters.append(thr)
+
+# Bipods estructurales en “V” conectando tanques al reactor/casco
+bipods = []
+for tank, cz in [(fuel_tank, P["fuel_tank_cz"]), (ox_tank, P["ox_tank_cz"])]:
+    for side in [-1, 1]:
+        leg = Part.makeCylinder(P["bipod_d"]/2, P["bipod_len"])
+        # Punto de partida en el reactor, destino hacia el tanque (inclinación controlada)
+        base = App.Vector(P["reactor_cx"] - P["reactor_l"]/2 + 150, side * P["bipod_span_y"], cz * 0.6)
+        leg.Placement = App.Placement(base, App.Rotation(App.Vector(0, 1, 0), P["bipod_angle_deg"]))
+        bipods.append(leg)
+
+# Sombrillas térmicas (discos finos en serie)
+shades = []
+for i in range(P["shade_n"]):
+    disk = Part.makeCylinder(P["shade_d"]/2, P["shade_t"])
+    cx = P["shade_cx"] - (P["shade_n"]*P["shade_spacing"]/2) + i * P["shade_spacing"]
+    disk.Placement = App.Placement(App.Vector(cx - P["shade_t"]/2, 0, 0), rot_to_x())
+    shades.append(disk)
+
+# ---------------- ENSAMBLAJE EN MASTER SOLID ----------------
+all_shapes = [
+    hull.Shape, reactor.Shape, rings_obj.Shape, coils_obj.Shape, bars_obj.Shape, noz_obj.Shape
+]
+# Añadimos piezas base
+all_shapes += [p.Shape for p in pipes]
+all_shapes += [t.Shape for t in turbines]
+all_shapes += [s.Shape for s in sensor_objs]
+if shield_obj:
+    all_shapes.append(shield_obj.Shape)
+
+# Añadimos subsistemas
+all_shapes += [fuel_tank, ox_tank, he_tank]
+all_shapes.append(sweep)
+all_shapes += rcs_thrusters
+all_shapes += bipods
+all_shapes += shades
+
+# Fusión progresiva en un único sólido
+master = all_shapes[0]
+for s in all_shapes[1:]:
+    try:
+        master = master.fuse(s)
+    except Exception as e:
+        # Evitar que un fallo bloquee todo; podrías registrar e para depurar
+        pass
+
+master_obj = add_obj(master, "QuantumIonDrive_MasterSolid")
+
+# Agrupación también disponible (opcional, pero el análisis FEM usaría master_obj)
+grp = doc.addObject("App::Part", "QuantumIonMotor_Super")
+for o in [hull, reactor, rings_obj, coils_obj, bars_obj, noz_obj] + pipes + turbines + sensor_objs:
+    grp.addObject(o)
+if shield_obj:
+    grp.addObject(shield_obj)
+# Insertamos proxies de subsistemas para visualización
+for label, shape in [("FuelTank_H2", fuel_tank), ("OxTank", ox_tank), ("HeTank", he_tank)]:
+    add_obj(shape, label)
+add_obj(sweep, "CoolantHelix")
+for i, thr in enumerate(rcs_thrusters, 1):
+    add_obj(thr, f"RCS_{i}")
+for i, leg in enumerate(bipods, 1):
+    add_obj(leg, f"Bipod_{i}")
+for i, disk in enumerate(shades, 1):
+    add_obj(disk, f"ThermalShade_{i}")
+
+# Recalcular y ajustar vista
+doc.recompute()
+try:
+    Gui.ActiveDocument.ActiveView.viewAxonometric()
+    Gui.SendMsgToActiveView("ViewFit")
+except:
+    pass
+
+

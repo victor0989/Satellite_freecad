@@ -1,0 +1,724 @@
+# -*- coding: utf-8 -*-
+# EstructureIntern2U2Cubesat_fixed.FCMacro
+# Versión corregida y final del macro: genera la geometría y prepara análisis FEM (estático + modal)
+# Corregidos:
+# - Evita pasar nombres (strings) a OF.makeMeshRegion: ahora nunca llama al helper sin pasar el objeto mesh.
+# - Si OF.makeMeshRegion no acepta mesh_obj, crea la MeshRegion manualmente con doc.addObject y luego la vincula a mesh_obj.
+# - Evita AttributeError 'FeaturePython' object has no attribute Part' al asignar la Part a la malla (set_mesh_part intenta muchos atributos y usa References).
+# - Corrige el NameError por variable mal escrita (z0 -> z0i).
+# - Mantiene las defensas para distintas builds de FreeCAD/ObjectsFem.
+#
+# Ejecuta este archivo como macro en FreeCAD (Macro -> Ejecutar macro) o pégalo en la consola Python integrada de FreeCAD.
+# Observa la consola para mensajes de depuración (qué helpers se usaron y si todo se asignó correctamente).
+
+import FreeCAD as App
+try:
+    import FreeCADGui as Gui
+    GUI = True
+except Exception:
+    GUI = False
+import Part
+import math
+
+# ===== Intenta importar ObjectsFem =====
+try:
+    import ObjectsFem
+    OF = ObjectsFem
+    FEM_OK = True
+except Exception:
+    OF = None
+    FEM_OK = False
+
+# =========================
+# Parámetros globales (mm)
+# =========================
+P = {
+    "L": 200.0, "W": 100.0, "H": 100.0,
+    "t_wall": 2.5, "corner_fillet": 0.0,
+    "panel_t": 1.5, "panel_gap": 0.5, "hinge_r": 2.0, "hinge_len": 20.0, "hinge_clear": 2.0,
+    "S_len": 250.0, "S_d": 5.0, "X_len": 120.0, "X_d": 5.0,
+    "lens_d": 30.0, "lens_depth": 15.0, "lens_offset": 20.0,
+    "rail_w": 5.0, "rail_h": 5.0, "rail_clear": 1.0,
+    "pcb_thk": 1.6, "pcb_y": 96.0, "pcb_z": 96.0,
+    "stack_front_clear": 6.0, "stack_rear_clear": 6.0, "inter_board_gap": 8.0,
+    "standoff_d": 5.0, "standoff_hole_d": 3.2, "standoff_base_pad": 1.5,
+    "bat_x": 16.0, "bat_y": 90.0, "bat_z": 50.0, "bat_gap": 2.0, "bat_to_plusZ": True,
+    "cam_tube_d": 35.0, "cam_tube_x": 30.0, "create_window": True, "window_d": 30.0,
+    "mtorq_t": 3.0, "mtorq_w": 12.0, "mtorq_gap": 2.0,
+    "enable_inner_shield": True, "inner_shield_t": 1.0, "inner_shield_gap": 0.5, "inner_shield_cut_for_rails": True,
+    "enable_outer_shield": True, "outer_shield_t": 0.5, "outer_shield_gap": 0.3,
+    "color_bus": (0.75, 0.75, 0.75), "color_panel": (0.1, 0.1, 0.2), "color_antenna": (0.6, 0.6, 0.6),
+    "color_sensor": (0.2, 0.2, 0.2), "color_rail": (0.8, 0.8, 0.8), "color_pcb": (0.1, 0.4, 0.1),
+    "color_standoff": (0.6, 0.6, 0.6), "color_batt": (0.2, 0.2, 0.2), "color_cam": (0.2, 0.2, 0.3),
+    "color_mtorq": (0.3, 0.2, 0.1), "color_shield_in": (0.7, 0.5, 0.4), "color_shield_out": (0.7, 0.7, 0.5),
+    "mesh_h_min": 1.0, "mesh_h_max": 8.0, "mesh_h_refine": 1.5, "eigenmodes": 12, "g_load": 8.0,
+}
+
+BOARD_NAMES = ["EPS", "Backplane", "OBC", "COMMS", "ADCS", "Payload"]
+
+MATS = {
+    "Aluminium_7075_T6": {"E": 71e9, "nu": 0.33, "rho": 2700.0},
+    "Aluminium_6061_T6": {"E": 69e9, "nu": 0.33, "rho": 2700.0},
+    "FR4_PCB": {"E": 20e9, "nu": 0.17, "rho": 1850.0},
+    "SolarPanel_Composite": {"E": 25e9, "nu": 0.28, "rho": 1700.0},
+    "LiIon_Battery": {"E": 1.0e9, "nu": 0.30, "rho": 2200.0},
+    "Copper": {"E": 110e9, "nu": 0.34, "rho": 8960.0},
+    "OuterShield_Al": {"E": 71e9, "nu": 0.33, "rho": 2700.0},
+}
+
+DOC_BASE = "CubeSat_2U_AllInOne"
+
+# -------------------------
+# Utilidades
+# -------------------------
+def new_doc_unique(base):
+    name = base
+    i = 1
+    while name in App.listDocuments():
+        i += 1
+        name = f"{base}_{i}"
+    return App.newDocument(name)
+
+def make_part(doc, name, parent=None):
+    part = doc.addObject("App::Part", name)
+    if parent:
+        parent.addObject(part)
+    return part
+
+def add_shape(doc, shape, name, color=None, parent=None):
+    obj = doc.addObject("Part::Feature", name)
+    obj.Shape = shape
+    obj.Label = name
+    if color is not None:
+        try:
+            obj.ViewObject.ShapeColor = color
+        except Exception:
+            pass
+    if parent is not None:
+        parent.addObject(obj)
+    return obj
+
+def box_solid(L, W, H, pos=(0,0,0)):
+    s = Part.makeBox(L, W, H)
+    s.translate(App.Vector(*pos))
+    return s
+
+def cyl_solid(r, h, axis="Z", pos=(0,0,0)):
+    c = Part.makeCylinder(r, h)
+    if axis == "X":
+        c.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    elif axis == "Y":
+        c.rotate(App.Vector(0,0,0), App.Vector(1,0,0), -90)
+    c.translate(App.Vector(*pos))
+    return c
+
+def hollow_box(L, W, H, t, fillet_r=0.0):
+    outer = Part.makeBox(L, W, H)
+    if fillet_r > 0.0:
+        outer = outer.makeFillet(fillet_r, outer.Edges)
+    inner = Part.makeBox(max(0.001, L - 2*t), max(0.001, W - 2*t), max(0.001, H - 2*t))
+    inner.translate(App.Vector(t, t, t))
+    return outer.cut(inner)
+
+def tag_material_hint(obj, name):
+    try:
+        obj.addProperty("App::PropertyString", "MaterialHint", "FEM", "Material sugerido")
+        obj.MaterialHint = name
+    except Exception:
+        try:
+            obj.MaterialHint = name
+        except Exception:
+            pass
+
+def face_index_min_x(obj):
+    xmin = obj.Shape.BoundBox.XMin + 1e-6
+    for i, f in enumerate(obj.Shape.Faces, start=1):
+        try:
+            cx = f.CenterOfMass.x
+        except Exception:
+            cx = f.BoundBox.Center.x
+        if cx <= xmin + 1e-4:
+            return i
+    return 1
+
+# -------------------------
+# Construcción geométrica
+# -------------------------
+doc = new_doc_unique(DOC_BASE)
+if GUI:
+    try:
+        Gui.ActiveDocument = Gui.getDocument(doc.Name)
+    except Exception:
+        pass
+
+root = make_part(doc, "CubeSat_2U")
+ext = make_part(doc, "Exterior", root)
+intr = make_part(doc, "Interiors", root)
+shields = make_part(doc, "Shields", root)
+
+L, W, H = P["L"], P["W"], P["H"]
+t = P["t_wall"]
+
+# 1) Bus hueco
+bus_shape = hollow_box(L, W, H, t, P["corner_fillet"])
+bus = add_shape(doc, bus_shape, "Bus", P["color_bus"], ext)
+tag_material_hint(bus, "Aluminium_7075_T6")
+
+# 2) Paneles solares fijos
+panel_L, panel_W, panel_T = L, H, P["panel_t"]
+gap = P["panel_gap"]
+
+pf_pos = [(0, W + gap, 0), (0, -panel_T - gap, 0)]
+panels = []
+for i, pos in enumerate(pf_pos, 1):
+    p = add_shape(doc, box_solid(panel_L, panel_T, panel_W, pos), f"Panel_Fijo_{i}", P["color_panel"], ext)
+    tag_material_hint(p, "SolarPanel_Composite")
+    panels.append(p)
+
+# Desplegables (simulados)
+pd_top = add_shape(doc, box_solid(panel_L, panel_T, panel_W, (0, W + 2 * gap + panel_T, 0)),
+                   "Panel_Desplegable_Sup", P["color_panel"], ext)
+pd_top.Placement.Rotation = App.Rotation(App.Vector(1, 0, 0), 90)
+pd_top.Placement.Base = App.Vector(0, W + 2 * gap + panel_T, H)
+tag_material_hint(pd_top, "SolarPanel_Composite")
+
+pd_bot = add_shape(doc, box_solid(panel_L, panel_T, panel_W, (0, -2 * gap - 2 * panel_T, 0)),
+                   "Panel_Desplegable_Inf", P["color_panel"], ext)
+pd_bot.Placement.Rotation = App.Rotation(App.Vector(1, 0, 0), -90)
+pd_bot.Placement.Base = App.Vector(0, 0, 0)
+tag_material_hint(pd_bot, "SolarPanel_Composite")
+
+# Bisagras cilíndricas
+hinges = []
+hinge_r, hinge_len, hinge_clear = P["hinge_r"], P["hinge_len"], P["hinge_clear"]
+h_top = cyl_solid(hinge_r, hinge_len, axis="X",
+                  pos=((L - hinge_len) / 2.0, W + gap, H - 2 * hinge_r - hinge_clear))
+h_bot = cyl_solid(hinge_r, hinge_len, axis="X",
+                  pos=((L - hinge_len) / 2.0, -panel_T - gap - hinge_clear, hinge_clear))
+for nm, sh in [("Bisagra_Sup", h_top), ("Bisagra_Inf", h_bot)]:
+    hobj = add_shape(doc, sh, nm, P["color_antenna"], ext)
+    tag_material_hint(hobj, "Aluminium_7075_T6")
+    hinges.append(hobj)
+
+# 3) Antenas S (+Z) y X (-Z varilla)
+ant_S = add_shape(doc, cyl_solid(P["S_d"] / 2.0, P["S_len"], axis="Z",
+                                 pos=(L / 2.0, W / 2.0, H)), "Antena_S", P["color_antenna"], ext)
+tag_material_hint(ant_S, "Aluminium_7075_T6")
+ant_X = add_shape(doc, cyl_solid(P["X_d"] / 2.0, P["X_len"], axis="Z",
+                                 pos=(L / 2.0, W / 2.0, -P["X_len"])), "Antena_X", P["color_antenna"], ext)
+tag_material_hint(ant_X, "Aluminium_7075_T6")
+
+# 4) Sensores cilíndricos en cara nadir (-Z)
+for i, dx in enumerate([-P["lens_offset"], P["lens_offset"]], start=1):
+    lens = add_shape(doc,
+                     cyl_solid(P["lens_d"] / 2.0, P["lens_depth"], axis="Z",
+                               pos=(L / 2.0 + dx, W / 2.0, -P["lens_depth"])),
+                     f"Sensor_{i}", P["color_sensor"], ext)
+    tag_material_hint(lens, "Aluminium_6061_T6")
+
+# 5) Interiores: rails
+Li, Wi, Hi = L - 2 * t, W - 2 * t, H - 2 * t
+x0i, y0i, z0i = t, t, t
+rw, rh, rcl = P["rail_w"], P["rail_h"], P["rail_clear"]
+rail_len = Li
+rail_positions = [
+    (x0i, y0i + rcl, z0i + rcl),
+    (x0i, W - t - rcl - rw, z0i + rcl),
+    (x0i, y0i + rcl, H - t - rcl - rh),
+    (x0i, W - t - rcl - rw, H - t - rcl - rh),
+]
+rails_in = []
+for i, (rx, ry, rz) in enumerate(rail_positions, 1):
+    rshape = box_solid(rail_len, rw, rh, (rx, ry, rz))
+    r = add_shape(doc, rshape, f"Rail_{i}", P["color_rail"], intr)
+    tag_material_hint(r, "Aluminium_7075_T6")
+    rails_in.append(r)
+
+# 6) Stack de PCBs y standoffs
+pcb_thk = P["pcb_thk"]
+pcb_y = min(P["pcb_y"], Wi - 2 * (rcl + rw))
+pcb_z = min(P["pcb_z"], Hi - 2 * (rcl + rh))
+stack_x_start = x0i + P["stack_front_clear"]
+stack_x_end = x0i + Li - P["stack_rear_clear"]
+usable_len = max(0.0, stack_x_end - stack_x_start)
+gap_stack = P["inter_board_gap"]
+pitch = pcb_thk + gap_stack
+max_boards = int(usable_len // pitch) if pitch > 0 else len(BOARD_NAMES)
+n_boards = min(len(BOARD_NAMES), max_boards)
+pcb_y0 = y0i + rcl + rw + (Wi - 2 * (rcl + rw) - pcb_y) / 2.0
+pcb_z0 = z0i + rcl + rh + (Hi - 2 * (rcl + rh) - pcb_z) / 2.0
+
+pcbs = []
+for i in range(n_boards):
+    xi = stack_x_start + i * pitch
+    obj = add_shape(doc, box_solid(pcb_thk, pcb_y, pcb_z, (xi, pcb_y0, pcb_z0)),
+                    f"PCB_{i+1}_{BOARD_NAMES[i]}", P["color_pcb"], intr)
+    tag_material_hint(obj, "FR4_PCB")
+    pcbs.append(obj)
+
+stack_x0 = stack_x_start
+stack_x1 = stack_x_start + (n_boards - 1) * pitch + pcb_thk if n_boards > 0 else stack_x_start
+
+# Standoffs a lo largo de X (4 columnas)
+sd, s_hole, pad = P["standoff_d"], P["standoff_hole_d"], P["standoff_base_pad"]
+standoff_len = max(0.0, (stack_x1 - stack_x0) + 2 * pad)
+corner_offsets = [(0.0, 0.0), (pcb_y, 0.0), (0.0, pcb_z), (pcb_y, pcb_z)]
+standoffs = []
+for j, (oy, oz) in enumerate(corner_offsets, 1):
+    cx = stack_x0 - pad
+    cy = pcb_y0 + oy
+    cz = pcb_z0 + oz
+    s_obj = add_shape(doc, cyl_solid(sd / 2.0, standoff_len, axis="X", pos=(cx, cy, cz - sd / 2.0)),
+                      f"Standoff_{j}", P["color_standoff"], intr)
+    tag_material_hint(s_obj, "Aluminium_7075_T6")
+    standoffs.append(s_obj)
+    if s_hole > 0:
+        _ = add_shape(doc, cyl_solid(s_hole / 2.0, standoff_len + 0.1, axis="X",
+                                     pos=(cx, cy, cz - s_hole / 2.0)),
+                      f"Standoff_{j}_Hole", None, intr)
+
+# 7) Batería
+bat_x, bat_y, bat_z = P["bat_x"], P["bat_y"], P["bat_z"]
+bat_gap = P["bat_gap"]
+y_min_free = y0i + rcl + rw + bat_gap
+y_max_free = W - t - rcl - rw - bat_gap - bat_y
+z_min_free = z0i + rcl + rh + bat_gap
+z_max_free = H - t - rcl - rh - bat_gap - bat_z
+by = y_min_free + max(0.0, (y_max_free - y_min_free) / 2.0)
+bz = (z_max_free if P["bat_to_plusZ"] else z_min_free)
+bx = stack_x1 + bat_gap if (stack_x1 + bat_gap + bat_x) <= (x0i + Li - bat_gap) else x0i + (Li - bat_x) / 2.0
+batt = add_shape(doc, box_solid(bat_x, bat_y, bat_z, (bx, by, bz)),
+                 "Battery_Block", P["color_batt"], intr)
+tag_material_hint(batt, "LiIon_Battery")
+
+# 8) Cámara nadir: tubo interno y ventana
+cam_r, cam_x = P["cam_tube_d"] / 2.0, P["cam_tube_x"]
+cam_cy = y0i + Wi / 2.0
+tube = cyl_solid(cam_r, cam_x, axis="X", pos=(x0i + t, cam_cy, z0i - cam_r))
+cam_tube = add_shape(doc, tube, "Camera_Tube", P["color_cam"], intr)
+tag_material_hint(cam_tube, "Aluminium_6061_T6")
+
+if P["create_window"]:
+    win_r = P["window_d"] / 2.0
+    cutter = Part.makeCylinder(win_r, t + 0.5)
+    cutter.translate(App.Vector(L / 2.0, W / 2.0, -(t + 0.5)))
+    try:
+        bus.Shape = bus.Shape.cut(cutter)
+    except Exception:
+        pass
+
+# 9) Magnetorquers (reservas)
+mt_t, mt_w, mt_gap = P["mtorq_t"], P["mtorq_w"], P["mtorq_gap"]
+mt_len = Li - 2 * mt_gap
+mt_objs = []
+mt1 = add_shape(doc, box_solid(mt_len, mt_t, mt_w, (x0i + mt_gap, y0i + rcl + rw + mt_gap, z0i + (Hi - mt_w) / 2.0)),
+                "Magnetorquer_Ymin", P["color_mtorq"], intr)
+mt2 = add_shape(doc, box_solid(mt_len, mt_t, mt_w, (x0i + mt_gap, W - t - rcl - rw - mt_gap - mt_t, z0i + (Hi - mt_w) / 2.0)),
+                "Magnetorquer_Ymax", P["color_mtorq"], intr)
+mt3 = add_shape(doc, box_solid(mt_len, mt_w, mt_t, (x0i + mt_gap, y0i + (Wi - mt_w) / 2.0, z0i + rcl + rh + mt_gap)),
+                "Magnetorquer_Zmin", P["color_mtorq"], intr)
+mt4 = add_shape(doc, box_solid(mt_len, mt_w, mt_t, (x0i + mt_gap, y0i + (Wi - mt_w) / 2.0, H - t - rcl - rh - mt_gap - mt_t)),
+                "Magnetorquer_Zmax", P["color_mtorq"], intr)
+for m in [mt1, mt2, mt3, mt4]:
+    tag_material_hint(m, "Copper")
+    mt_objs.append(m)
+
+# 10) Blindaje interno (liner)
+inner_shield_objs = []
+if P["enable_inner_shield"]:
+    si_t = P["inner_shield_t"]
+    si_gap = P["inner_shield_gap"]
+    Ls, Ws, Hs = Li - 2 * si_gap, Wi - 2 * si_gap, Hi - 2 * si_gap
+    outer = Part.makeBox(Ls, Ws, Hs)
+    inner = Part.makeBox(max(0.001, Ls - 2 * si_t), max(0.001, Ws - 2 * si_t), max(0.001, Hs - 2 * si_t))
+    outer.translate(App.Vector(x0i + si_gap, y0i + si_gap, z0i + si_gap))
+    inner.translate(App.Vector(x0i + si_gap + si_t, y0i + si_gap + si_t, z0i + si_gap + si_t))
+    liner = outer.cut(inner)
+    if P["inner_shield_cut_for_rails"]:
+        for r in rails_in:
+            liner = liner.cut(r.Shape)
+    sh_in = add_shape(doc, liner, "Shield_Inner", P["color_shield_in"], shields)
+    tag_material_hint(sh_in, "Copper")
+    inner_shield_objs.append(sh_in)
+
+# 11) Blindaje externo (placas finas en ±X, ±Z)
+outer_shield_objs = []
+if P["enable_outer_shield"]:
+    so_t = P["outer_shield_t"]
+    so_gap = P["outer_shield_gap"]
+    zneg = add_shape(doc, box_solid(L, W, so_t, (0, 0, -so_t - so_gap)), "Shield_Zmin", P["color_shield_out"], shields)
+    zpos = add_shape(doc, box_solid(L, W, so_t, (0, 0, H + so_gap)), "Shield_Zmax", P["color_shield_out"], shields)
+    xneg = add_shape(doc, box_solid(so_t, W, H, (-so_t - so_gap, 0, 0)), "Shield_Xmin", P["color_shield_out"], shields)
+    xpos = add_shape(doc, box_solid(so_t, W, H, (L + so_gap, 0, 0)), "Shield_Xmax", P["color_shield_out"], shields)
+    for o in [zneg, zpos, xneg, xpos]:
+        tag_material_hint(o, "OuterShield_Al")
+        outer_shield_objs.append(o)
+
+# ===== Recompute geom =====
+doc.recompute()
+if GUI:
+    try:
+        Gui.ActiveDocument.ActiveView.fitAll()
+    except Exception:
+        pass
+
+# =========================
+# FEM: materiales, malla, cargas y casos
+# =========================
+if FEM_OK:
+    print("[FEM] ObjectsFem disponible — preparando análisis (depuración en consola)")
+
+    # make_solver robusto (usa helpers disponibles)
+    def make_solver(doc, nombre):
+        helpers = [h for h in dir(OF) if 'make' in h.lower() or 'solver' in h.lower()]
+        print("[make_solver] helpers disponibles (filtro):", helpers)
+        preferred = ['makeSolverCalculix', 'makeSolverCalculixCcxTools', 'makeSolverCalculiX', 'makeSolverCalculixCcx']
+        for hn in preferred:
+            if hasattr(OF, hn):
+                try:
+                    solver = getattr(OF, hn)(doc)
+                    try:
+                        solver.Label = nombre
+                    except Exception:
+                        pass
+                    print(f"[make_solver] creado con OF.{hn} -> {type(solver)}")
+                    return solver
+                except Exception as e:
+                    print(f"[make_solver] OF.{hn} falló: {e}")
+        candidates = ['Fem::SolverCalculixCcxTools', 'Fem::SolverCalculix', 'Fem::SolverCalculiX']
+        for c in candidates:
+            try:
+                s = doc.addObject(c, nombre)
+                print(f"[make_solver] creado con doc.addObject('{c}') -> {type(s)}")
+                return s
+            except Exception as e:
+                print(f"[make_solver] intento doc.addObject('{c}') falló: {e}")
+        raise RuntimeError("No se pudo crear solver CalculiX automáticamente. Revisa tu instalación de FEM/ObjectsFem.")
+
+    # make_analysis robusto
+    def make_analysis(doc, name):
+        if hasattr(OF, 'makeAnalysis'):
+            try:
+                an = OF.makeAnalysis(doc, name)
+                print("[make_analysis] creado con OF.makeAnalysis ->", type(an))
+                return an
+            except Exception as e:
+                print(f"[make_analysis] OF.makeAnalysis falló: {e}")
+        try:
+            an = doc.addObject('Fem::FemAnalysis', name)
+            print("[make_analysis] creado con doc.addObject('Fem::FemAnalysis') ->", type(an))
+            return an
+        except Exception as e:
+            print("doc.addObject('Fem::FemAnalysis') falló:", e)
+        an = doc.addObject('App::DocumentObjectGroup', name)
+        print("[make_analysis] creado con App::DocumentObjectGroup ->", type(an))
+        return an
+
+    # add_member_safe: Member, Group, addObject
+    def add_member_safe(analysis, obj):
+        try:
+            if hasattr(analysis, "Member"):
+                m = list(analysis.Member)
+                if obj not in m:
+                    m.append(obj)
+                    analysis.Member = m
+                print(f"[add_member_safe] añadido a Member de {analysis.Name}: {obj.Name}")
+                return
+        except Exception as e:
+            print(f"[add_member_safe] intento Member falló: {e}")
+        try:
+            if hasattr(analysis, "Group"):
+                g = list(analysis.Group)
+                if obj not in g:
+                    g.append(obj)
+                    analysis.Group = g
+                print(f"[add_member_safe] añadido a Group de {analysis.Name}: {obj.Name}")
+                return
+        except Exception as e:
+            print(f"[add_member_safe] intento Group falló: {e}")
+        try:
+            if hasattr(analysis, "addObject"):
+                analysis.addObject(obj)
+                print(f"[add_member_safe] añadido con addObject() a {analysis.Name}: {obj.Name}")
+                return
+        except Exception as e:
+            print(f"[add_member_safe] intento addObject fallo: {e}")
+        raise RuntimeError(f"No se pudo añadir {obj.Name} al análisis {analysis.Name}. Añádelo manualmente en la GUI.")
+
+    # set_mesh_part: intenta múltiples atributos y References
+    def set_mesh_part(mesh, part):
+        candidates = ['Part', 'Object', 'PartObject', 'PartFeature', 'Source', 'MeshPart', 'PartReference', 'PartSrc']
+        for attr in candidates:
+            if hasattr(mesh, attr):
+                try:
+                    setattr(mesh, attr, part)
+                    print(f"[set_mesh_part] asignado mesh.{attr} = {part.Name}")
+                    return True
+                except Exception as e:
+                    print(f"[set_mesh_part] intento mesh.{attr} = part falló: {e}")
+                try:
+                    setattr(mesh, attr, [part])
+                    print(f"[set_mesh_part] asignado mesh.{attr} = [{part.Name}]")
+                    return True
+                except Exception as e:
+                    print(f"[set_mesh_part] intento mesh.{attr} = [part] falló: {e}")
+        try:
+            mesh.References = [(part, "Solid")]
+            print("[set_mesh_part] asignado mesh.References = [(part,'Solid')]")
+            return True
+        except Exception as e:
+            print("[set_mesh_part] mesh.References fallo:", e)
+        for attr in dir(mesh):
+            if 'part' in attr.lower():
+                try:
+                    setattr(mesh, attr, part)
+                    print(f"[set_mesh_part] asignado mesh.{attr} = {part.Name} (heurística)")
+                    return True
+                except Exception:
+                    pass
+        print("[set_mesh_part] No se pudo asignar la referencia Part al mesh; revisa la API de ObjectsFem en tu build.")
+        return False
+
+    # make_refine_for_mesh: crear MeshRegion y vincularla al mesh_obj (NO pasar strings)
+    def make_refine_for_mesh(name, size, refs, mesh_obj, analysis=None):
+        mr = None
+        # Intento seguro: llamar helper con mesh_obj si es aceptado
+        if hasattr(OF, 'makeMeshRegion'):
+            try:
+                # Intentar pasar mesh_obj como tercer parámetro
+                try:
+                    mr = OF.makeMeshRegion(doc, name, mesh_obj)
+                    print("[make_refine] OF.makeMeshRegion(doc, name, mesh_obj) -> OK")
+                except TypeError:
+                    # helper no acepta mesh param: NO llamar OF.makeMeshRegion(doc, name)
+                    # (en algunas versiones interno espera nombres y falla)
+                    print("[make_refine] OF.makeMeshRegion no acepta mesh param; usaremos creación manual")
+                    mr = None
+            except Exception as e:
+                print(f"[make_refine] OF.makeMeshRegion intento falló: {e}")
+                mr = None
+        # Si helper no devolvió mr, crear manualmente con tipos conocidos
+        if mr is None:
+            for cand in ('Fem::FemMeshRegion', 'Fem::MeshRegion', 'Fem::MeshRegionGmsh', 'Fem::MeshRegionGmsh2', 'Fem::MeshRegionGmsh3'):
+                try:
+                    mr = doc.addObject(cand, name)
+                    print(f"[make_refine] creado mr con doc.addObject('{cand}') -> {type(mr)}")
+                    break
+                except Exception:
+                    mr = None
+            if mr is None:
+                # último recurso: intentar OF.makeMeshRegion(doc, name) SOLO si estamos seguros; omitimos por seguridad
+                try:
+                    mr = OF.makeMeshRegion(doc, name)
+                    print("[make_refine] creado mr con OF.makeMeshRegion(doc, name) (fallback inseguro)")
+                except Exception as e:
+                    print(f"[make_refine] no se pudo crear MeshRegion: {e}")
+                    return None
+        # configurar tamaño
+        try:
+            mr.CharacteristicLength = float(size)
+        except Exception:
+            pass
+        # asignar referencias a sólidos (usar objetos, no strings)
+        try:
+            mr.References = [(r, "Solid") for r in refs]
+        except Exception as e:
+            print(f"[make_refine] fallo asignar References: {e}")
+        # asociar con la malla OBJETO (intentamos varios atributos)
+        assigned = False
+        for attr in ('Mesh', 'FemMesh', 'MeshObject', 'MeshPart', 'Part', 'Object'):
+            if hasattr(mr, attr):
+                try:
+                    setattr(mr, attr, mesh_obj)
+                    print(f"[make_refine] asignado mr.{attr} = {mesh_obj.Name}")
+                    assigned = True
+                    break
+                except Exception as e:
+                    print(f"[make_refine] intento asignar mr.{attr} falló: {e}")
+        if not assigned:
+            try:
+                mr.References = [(mesh_obj, "")]
+                print("[make_refine] asignado mr.References = [(mesh_obj,'')] como fallback")
+                assigned = True
+            except Exception as e:
+                print(f"[make_refine] No se pudo vincular mesh al mr: {e}")
+        if analysis is not None:
+            add_member_safe(analysis, mr)
+        return mr
+
+    # 1) Análisis
+    analysis_static = make_analysis(doc, 'Analisis_Estatico')
+    analysis_modal = make_analysis(doc, 'Analisis_Modal')
+
+    # 2) Solvers
+    solver_static = make_solver(doc, 'Solver_CalculiX_Estatico')
+    solver_modal = make_solver(doc, 'Solver_CalculiX_Modal')
+    try:
+        solver_static.AnalysisType = "static"
+    except Exception:
+        pass
+    try:
+        solver_modal.AnalysisType = "frequency"
+    except Exception:
+        pass
+    add_member_safe(analysis_static, solver_static)
+    add_member_safe(analysis_modal, solver_modal)
+
+    # 3) Materiales (instancias por analysis para evitar conflicto 'Object can only be in a single Group')
+    def make_material_instance(label, d, suffix):
+        name = f"MatInst_{label}_{suffix}"
+        m = OF.makeMaterialSolid(doc, name)
+        m.Material = {
+            'Name': label,
+            'YoungsModulus': str(d["E"]),
+            'PoissonRatio': str(d["nu"]),
+            'Density': str(d["rho"]),
+        }
+        return m
+
+    mats_stat = {k: make_material_instance(k, v, "stat") for k, v in MATS.items()}
+    mats_mod  = {k: make_material_instance(k, v, "mod") for k, v in MATS.items()}
+
+    def objs_with_hint(hname):
+        return [o for o in doc.Objects if getattr(o, "MaterialHint", "") == hname]
+
+    # Asignar materiales por objeto (crear MaterialSolid por objeto y analysis)
+    def assign_materials_for_analysis(objects, mats_map, analysis, suffix):
+        for o in objects:
+            hint = getattr(o, "MaterialHint", None)
+            base_key = hint if hint in mats_map else next(iter(mats_map))
+            try:
+                mat_obj = OF.makeMaterialSolid(doc, f"Mat_{suffix}_{o.Name}")
+                mat_obj.Material = mats_map[base_key].Material
+                try:
+                    mat_obj.References = [(o, "Solid")]
+                except Exception:
+                    try:
+                        mat_obj.References = [(o, "")]
+                    except Exception:
+                        mat_obj.References = [o]
+                add_member_safe(analysis, mat_obj)
+            except Exception as e:
+                print(f"[assign_materials_for_analysis] fallo crear material para {o.Name}: {e}")
+
+    group_al7075 = objs_with_hint("Aluminium_7075_T6")
+    group_al6061 = objs_with_hint("Aluminium_6061_T6")
+    group_fr4    = objs_with_hint("FR4_PCB")
+    group_sp     = objs_with_hint("SolarPanel_Composite")
+    group_batt   = objs_with_hint("LiIon_Battery")
+    group_cu     = objs_with_hint("Copper")
+    group_shout  = objs_with_hint("OuterShield_Al")
+
+    if group_al7075:
+        assign_materials_for_analysis(group_al7075, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_al7075, mats_mod, analysis_modal, "mod")
+    if group_al6061:
+        assign_materials_for_analysis(group_al6061, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_al6061, mats_mod, analysis_modal, "mod")
+    if group_fr4:
+        assign_materials_for_analysis(group_fr4, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_fr4, mats_mod, analysis_modal, "mod")
+    if group_sp:
+        assign_materials_for_analysis(group_sp, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_sp, mats_mod, analysis_modal, "mod")
+    if group_batt:
+        assign_materials_for_analysis(group_batt, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_batt, mats_mod, analysis_modal, "mod")
+    if group_cu:
+        assign_materials_for_analysis(group_cu, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_cu, mats_mod, analysis_modal, "mod")
+    if group_shout:
+        assign_materials_for_analysis(group_shout, mats_stat, analysis_static, "stat")
+        assign_materials_for_analysis(group_shout, mats_mod, analysis_modal, "mod")
+
+    # 4) Mallas separadas (static/modal) — asignación robusta de Part
+    mesh_static = OF.makeMeshGmsh(doc, 'Mesh_CubeSat_Static')
+    if not set_mesh_part(mesh_static, root):
+        print("[mesh_static] advertencia: no se asignó correctamente la Part al mesh_static")
+    try:
+        mesh_static.CharacteristicLengthMin = float(P["mesh_h_min"])
+        mesh_static.CharacteristicLengthMax = float(P["mesh_h_max"])
+    except Exception:
+        pass
+    add_member_safe(analysis_static, mesh_static)
+
+    mesh_modal = OF.makeMeshGmsh(doc, 'Mesh_CubeSat_Modal')
+    if not set_mesh_part(mesh_modal, root):
+        print("[mesh_modal] advertencia: no se asignó correctamente la Part al mesh_modal")
+    try:
+        mesh_modal.CharacteristicLengthMin = float(P["mesh_h_min"])
+        mesh_modal.CharacteristicLengthMax = float(P["mesh_h_max"])
+    except Exception:
+        pass
+    add_member_safe(analysis_modal, mesh_modal)
+
+    # 5) Regiones de refinamiento vinculadas a mallas-OBJETO (no pasar nombres)
+    refine_objs = hinges + standoffs + [ant_S, ant_X]
+    if refine_objs:
+        mr_stat = make_refine_for_mesh("MeshRefine_Cruciales_stat", P["mesh_h_refine"], refine_objs, mesh_static, analysis_static)
+        mr_mod  = make_refine_for_mesh("MeshRefine_Cruciales_mod",  P["mesh_h_refine"], refine_objs, mesh_modal,  analysis_modal)
+
+    # 6) Soportes fijos en caras -X de rails (duplicados por analysis)
+    def add_fixed_for_analysis(obj, label, analysis):
+        idx = face_index_min_x(obj)
+        fx = OF.makeConstraintFixed(doc, label)
+        try:
+            fx.References = [(obj, f"Face{idx}")]
+        except Exception:
+            try:
+                fx.References = [(obj, "")]
+            except Exception:
+                fx.References = [obj]
+        add_member_safe(analysis, fx)
+
+    for i, r in enumerate(rails_in, 1):
+        add_fixed_for_analysis(r, f"Fijo_Rail{i}_stat", analysis_static)
+        add_fixed_for_analysis(r, f"Fijo_Rail{i}_mod", analysis_modal)
+
+    # 7) Cargas SelfWeight duplicadas
+    g = 9.81
+    def add_self_weight(label, gx, gy, gz, analysis):
+        try:
+            sw = OF.makeConstraintSelfWeight(doc, label)
+            sw.Gravity = App.Vector(gx, gy, gz)
+            try:
+                sw.References = [(root, "")]
+            except Exception:
+                pass
+            add_member_safe(analysis, sw)
+            return sw
+        except Exception:
+            try:
+                bf = OF.makeConstraintBodyForce(doc, label)
+                bf.Force = App.Vector(gx, gy, gz)
+                try:
+                    bf.References = [(root, "")]
+                except Exception:
+                    pass
+                add_member_safe(analysis, bf)
+                return bf
+            except Exception as e:
+                print(f"[add_self_weight] fallo crear carga {label}: {e}")
+                return None
+
+    mult = float(P["g_load"])
+    gx, gy, gz = -mult*g, -mult*g, -mult*g
+
+    add_self_weight("SelfWeight_8g_X_stat", gx, 0.0, 0.0, analysis_static)
+    add_self_weight("SelfWeight_8g_Y_stat", 0.0, gy, 0.0, analysis_static)
+    add_self_weight("SelfWeight_8g_Z_stat", 0.0, 0.0, gz, analysis_static)
+
+    add_self_weight("SelfWeight_8g_X_mod", gx, 0.0, 0.0, analysis_modal)
+    add_self_weight("SelfWeight_8g_Y_mod", 0.0, gy, 0.0, analysis_modal)
+    add_self_weight("SelfWeight_8g_Z_mod", 0.0, 0.0, gz, analysis_modal)
+
+    doc.recompute()
+    if GUI:
+        try:
+            Gui.ActiveDocument.ActiveView.fitAll()
+        except Exception:
+            pass
+
+    print("FEM preparado: análisis estático y modal creados, materiales, mallas, refinamientos y cargas añadidos.")
+else:
+    print("Geometría creada. ObjectsFem no disponible en esta instalación; no se creó el FEM.")

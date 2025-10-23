@@ -1,0 +1,188 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+# ---------------- DOCUMENTO ----------------
+doc_name = "ArgonLander_CassiniClean_Master"
+if App.ActiveDocument is None or App.ActiveDocument.Label != doc_name:
+    App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# ---------------- PARÁMETROS ----------------
+P = {
+    # Cuerpo principal y cúpula
+    "bus_d": 4200, "bus_len": 5200, "bus_t": 80,
+    "dome_R": 2100, "dome_t": 40, "dome_cx": -350,  # cúpula superior
+
+    # Tanques laterales (esferas)
+    "side_tank_R": 1600, "side_tank_offset_y": 3600, "side_tank_cx": 500,
+
+    # Toberas principales
+    "main_throat": 900, "main_exit": 2200, "main_len": 1800,
+    "main_sep_z": 1400, "main_cx": 2600,
+
+    # Patas y pads
+    "leg_n": 4, "leg_len": 2600, "leg_d": 240,
+    "leg_base_cx": -600, "leg_base_R": 2200,  # anclaje en anillo
+    "pad_d": 1600, "pad_t": 120, "pad_drop": 2200,
+
+    # Puntales (struts) superiores e intermedios
+    "strut_d": 180, "strut_len": 2000,
+    "ring_d": 4200, "ring_t": 80, "ring_cx": 0,
+
+    # Bridas/anillos
+    "flange_n": 5, "flange_d": 4400, "flange_t": 60, "flange_pitch": 600,
+
+    # Truss simple externo (opcional, fino)
+    "truss_tube_d": 160, "truss_rows": 4, "truss_cols": 12,
+    "truss_belt_len": 2800, "truss_belt_cx": 600, "truss_radius_offset": 260,
+
+    # Color mint argón
+    "mint": (0.70, 0.95, 0.85), "dark": (0.35, 0.55, 0.50), "accent": (0.55, 0.85, 0.75)
+}
+
+# ---------------- UTILIDADES ----------------
+X_AXIS = App.Vector(1,0,0); Y_AXIS = App.Vector(0,1,0); Z_AXIS = App.Vector(0,0,1)
+def rot_to_x(): return App.Rotation(Y_AXIS, 90)
+
+def add_obj(shape, label, color=None):
+    o = doc.addObject("Part::Feature", label)
+    o.Shape = shape
+    if color and hasattr(o, "ViewObject"): o.ViewObject.ShapeColor = color
+    return o
+
+def is_valid(shape):
+    try: return (shape is not None) and (not shape.isNull())
+    except: return False
+
+def fuse_many(items):
+    seq = []
+    for s in items:
+        sh = s.Shape if hasattr(s, "Shape") else s
+        if is_valid(sh): seq.append(sh)
+    if not seq: return None
+    u = seq[0]
+    for sh in seq[1:]:
+        try: u = u.fuse(sh)
+        except: pass
+    return u
+
+def cyl_x(d, L, cx=0, cy=0, cz=0):
+    c = Part.makeCylinder(d/2.0, L)
+    c.Placement = App.Placement(App.Vector(cx - L/2.0, cy, cz), rot_to_x())
+    return c
+
+def cone_x(d1, d2, L, cx=0, cy=0, cz=0):
+    c = Part.makeCone(d1/2.0, d2/2.0, L)
+    c.Placement = App.Placement(App.Vector(cx - L/2.0, cy, cz), rot_to_x())
+    return c
+
+def sphere_at(R, cx=0, cy=0, cz=0):
+    s = Part.makeSphere(R)
+    s.Placement = App.Placement(App.Vector(cx, cy, cz), App.Rotation())
+    return s
+
+def ring_x(D, t, cx=0, cy=0, cz=0):
+    return cyl_x(D, t, cx=cx, cy=cy, cz=cz)
+
+# ---------------- CUERPO + CÚPULA ----------------
+bus_outer = cyl_x(P["bus_d"], P["bus_len"], cx=0)
+bus_inner = cyl_x(P["bus_d"] - 2*P["bus_t"], P["bus_len"] - 2*P["bus_t"], cx=0)
+bus_shell = bus_outer.cut(bus_inner)
+
+dome_outer = sphere_at(P["dome_R"], cx=P["dome_cx"])
+dome_inner = sphere_at(P["dome_R"] - P["dome_t"], cx=P["dome_cx"])
+# Seccionamos cúpula para que sea hemisferio
+cut_box = Part.makeBox(2*P["dome_R"], 4*P["dome_R"], 4*P["dome_R"],
+                       App.Vector(P["dome_cx"], -2*P["dome_R"], -2*P["dome_R"]))
+dome_shell = dome_outer.common(cut_box).cut(dome_inner.common(cut_box))
+
+# ---------------- TANQUES ESFÉRICOS LATERALES ----------------
+tank_L = sphere_at(P["side_tank_R"], cx=P["side_tank_cx"], cy=-P["side_tank_offset_y"])
+tank_R = sphere_at(P["side_tank_R"], cx=P["side_tank_cx"], cy= P["side_tank_offset_y"])
+
+# ---------------- TOBERAS PRINCIPALES (2) ----------------
+nozz_1 = cone_x(P["main_throat"], P["main_exit"], P["main_len"],
+                cx=P["main_cx"], cz= P["main_sep_z"])
+nozz_2 = cone_x(P["main_throat"], P["main_exit"], P["main_len"],
+                cx=P["main_cx"], cz=-P["main_sep_z"])
+
+# ---------------- PATAS (4) Y PADS ----------------
+legs = []; pads = []
+for i in range(P["leg_n"]):
+    az = i * (360.0 / P["leg_n"])
+    y = P["leg_base_R"] * math.cos(math.radians(az))
+    z = P["leg_base_R"] * math.sin(math.radians(az))
+    # Viga de la pata (cilindro inclinado sutilmente hacia abajo)
+    leg = cyl_x(P["leg_d"], P["leg_len"], cx=P["leg_base_cx"], cy=y*0.98, cz=z*0.98)
+    legs.append(leg)
+    # Pad circular en el suelo: cilindro corto
+    pad = cyl_x(P["pad_d"], P["pad_t"], cx=P["leg_base_cx"] - P["pad_drop"], cy=y, cz=z)
+    pads.append(pad)
+
+# ---------------- PUNTALES SUPERIORES E INTERMEDIOS ----------------
+struts = []
+# Anillo superior alrededor de la cúpula
+ring_top = ring_x(P["ring_d"], P["ring_t"], cx=P["ring_cx"])
+# Puntales desde ring_top a los tanques esféricos
+for side in [-1, 1]:
+    for k in range(6):
+        az = k * (360.0 / 6)
+        y = (P["bus_d"]/2.0 + 600) * math.cos(math.radians(az)) * side
+        z = (P["bus_d"]/2.0 + 600) * math.sin(math.radians(az))
+        s = cyl_x(P["strut_d"], P["strut_len"], cx=P["ring_cx"] + 300, cy=y, cz=z)
+        struts.append(s)
+
+# ---------------- BRIDAS / ANILLOS ESTRUCTURALES ----------------
+flanges = []
+fx0 = -200
+for i in range(P["flange_n"]):
+    x = fx0 + i * P["flange_pitch"]
+    fl = ring_x(P["flange_d"], P["flange_t"], cx=x)
+    flanges.append(fl)
+
+# ---------------- TRUSS EXTERNO (opcional, fino) ----------------
+truss = []
+belt_x0 = P["truss_belt_cx"] - P["truss_belt_len"]/2.0
+belt_x1 = P["truss_belt_cx"] + P["truss_belt_len"]/2.0
+row_gap = (belt_x1 - belt_x0) / (P["truss_rows"] + 1)
+radius_truss = P["bus_d"]/2.0 + P["truss_radius_offset"]
+
+for r in range(P["truss_rows"]):
+    cx = belt_x0 + (r+1)*row_gap
+    for c in range(P["truss_cols"]):
+        az = c * (360.0 / P["truss_cols"])
+        y = radius_truss * math.cos(math.radians(az))
+        z = radius_truss * math.sin(math.radians(az))
+        tube = cyl_x(P["truss_tube_d"], 260, cx=cx, cy=y, cz=z)
+        truss.append(tube)
+
+# ---------------- ENSAMBLAJE EN SÓLIDO ÚNICO ----------------
+items = [
+    bus_shell, dome_shell, tank_L, tank_R,
+    nozz_1, nozz_2, ring_top
+] + legs + pads + struts + flanges + truss
+
+master = fuse_many(items)
+master_obj = add_obj(master, "ArgonLander_MasterSolid", color=P["mint"])
+
+# ---------------- VISUAL AUXILIAR ----------------
+add_obj(bus_shell, "BusShell", color=P["accent"])
+add_obj(dome_shell, "DomeShell", color=P["accent"])
+add_obj(tank_L, "SideTank_L", color=P["mint"])
+add_obj(tank_R, "SideTank_R", color=P["mint"])
+add_obj(nozz_1, "MainNozzle_1", color=P["dark"])
+add_obj(nozz_2, "MainNozzle_2", color=P["dark"])
+add_obj(ring_top, "TopRing", color=P["accent"])
+for i, lg in enumerate(legs, 1): add_obj(lg, f"Leg_{i}", color=P["accent"])
+for i, pd in enumerate(pads, 1): add_obj(pd, f"Pad_{i}", color=P["accent"])
+for i, st in enumerate(struts, 1): add_obj(st, f"Strut_{i}", color=P["accent"])
+for i, fl in enumerate(flanges, 1): add_obj(fl, f"Flange_{i}", color=P["accent"])
+for i, tr in enumerate(truss, 1): add_obj(tr, f"Truss_{i}", color=P["accent"])
+
+# ---------------- VISTA ----------------
+doc.recompute()
+try:
+    Gui.ActiveDocument.ActiveView.viewAxonometric()
+    Gui.SendMsgToActiveView("ViewFit")
+except:
+    pass

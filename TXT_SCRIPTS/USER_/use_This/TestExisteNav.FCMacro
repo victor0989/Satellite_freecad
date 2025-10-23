@@ -1,0 +1,524 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name = "CassiniUltra_HeavySatellite_RadiationShield_SOLID_INTEGRATED_ELEC"
+doc = App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label == doc_name else App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# ---------------- Parámetros reforzados ----------------
+P = {
+    # Estructura principal
+    "tank_len": 11000.0, "tank_d": 6000.0, "hull_t": 85.0, "hull_outer_d": 7000.0, "liner_t": 36.0,
+    # TPS + Parker
+    "tps_front_R": 4200.0, "tps_front_t": 220.0, "tps_offset": 780.0, "shoulder_len": 1600.0,
+    # Bus
+    "bus_len": 5200.0, "bus_outer_d": 6800.0, "bus_inner_d": 5600.0,
+    # HGA
+    "hga_R": 2800.0, "hga_t": 32.0, "hga_offset": 880.0, "hga_mast_len": 2000.0, "hga_mast_d": 320.0,
+    # RTGs
+    "rtg_box_l": 1600.0, "rtg_box_w": 920.0, "rtg_box_t": 420.0, "rtg_arm_len": 1650.0, "rtg_arm_d": 320.0,
+    "rtg_arm_offset_z": 1400.0,
+    # Motor principal
+    "throat_d": 900.0, "exit_d": 5600.0, "nozzle_len": 4600.0,
+    "gimbal_ring_ro": 2800.0, "gimbal_ring_t": 160.0,
+    # Estructura interna
+    "bulkhead_t": 90.0, "frame_ring_d": 4600.0, "frame_ring_t": 140.0, "frame_step": 800.0,
+    # RCS/Aux
+    "rcs_thr_d": 520.0, "rcs_thr_len": 900.0, "rcs_ring_R": 4200.0, "rcs_count": 12,
+    "aux_thr_d": 1200.0, "aux_thr_len": 1800.0, "aux_thr_ring_R": 4800.0, "aux_thr_count": 12,
+    # Escudo radiación + Whipple
+    "rad_shield_inner_d": 7600.0, "rad_shield_t": 220.0, "rad_shield_gap": 120.0, "rad_shield_len": 7600.0,
+    "whipple_t": 80.0, "whipple_gap": 300.0,
+    # Pallet + instrumentos
+    "inst_bay_len": 2400.0, "inst_bay_d": 4800.0,
+    # Booms
+    "mag_boom_len": 5200.0, "mag_boom_d": 220.0, "star_boom_len": 3800.0, "star_boom_d": 180.0,
+    # Fins
+    "fin_len": 1600.0, "fin_w": 940.0, "fin_t": 180.0,
+    # Propulsión iónica
+    "ion_thr_d": 380.0, "ion_thr_len": 1100.0, "ion_ring_R": 3600.0, "ion_count": 16,
+    # Hall
+    "hall_thr_d": 720.0, "hall_thr_len": 1400.0, "hall_arm_len": 1800.0,
+    # Radiadores
+    "rad_len": 3200.0, "rad_w": 1400.0, "rad_t": 90.0, "rad_z": 1800.0,
+    # Parker shield frontal
+    "parker_shield_R": 3200.0,
+    # Engine bay
+    "engine_bay_len": 2800.0
+}
+
+# Materiales (metadata para FEM)
+MATS = {
+    "Hull": {"name": "Ti-6Al-4V", "rho": 4430, "E": 114e9, "nu": 0.34},
+    "Tank": {"name": "Al-Li 2195", "rho": 2700, "E": 73e9, "nu": 0.33},
+    "Shield": {"name": "CFRP+PE+W", "rho": 1900, "E": 60e9, "nu": 0.28},
+    "Whipple": {"name": "Al 6061-T6", "rho": 2700, "E": 69e9, "nu": 0.33},
+    "Nozzle": {"name": "C/SiC", "rho": 2600, "E": 300e9, "nu": 0.15},
+    "RTG": {"name": "Inconel+Graphite", "rho": 8200, "E": 200e9, "nu": 0.29},
+    "Booms": {"name": "Al 7075-T6", "rho": 2810, "E": 72e9, "nu": 0.33},
+    "Radiator": {"name": "Al+Ammonia plate", "rho": 1500, "E": 40e9, "nu": 0.29},
+    "HGA": {"name": "CFRP Honeycomb", "rho": 1400, "E": 70e9, "nu": 0.30},
+    "Avionics": {"name": "Al Frame + PCB", "rho": 2200, "E": 50e9, "nu": 0.30},
+    "PE_Shield": {"name": "HDPE", "rho": 950, "E": 1.1e9, "nu": 0.42},
+    "TrayCube": {"name": "Al 7075 + CFRP", "rho": 1750, "E": 60e9, "nu": 0.30},
+    "TrayCirc": {"name": "Al 6061 + CFRP", "rho": 1800, "E": 58e9, "nu": 0.30},
+    "Rail": {"name": "Ti-6Al-4V", "rho": 4430, "E": 114e9, "nu": 0.34}
+}
+
+# ---------------- Utilidades geométricas ----------------
+X_AXIS = App.Vector(1,0,0); Y_AXIS = App.Vector(0,1,0); Z_AXIS = App.Vector(0,0,1)
+rot_to_x = lambda: App.Rotation(Y_AXIS,90)
+
+def add_obj(s, n):
+    o = doc.addObject("Part::Feature", n); o.Shape = s; return o
+
+def color(o, rgb): 
+    if hasattr(o, "ViewObject"): o.ViewObject.ShapeColor = rgb
+
+def cyl_x(d, L, cx=0, cy=0, cz=0):
+    s = Part.makeCylinder(d/2.0, L)
+    s.Placement = App.Placement(App.Vector(cx - L/2.0, cy, cz), rot_to_x())
+    return s
+
+def cone_x(d1, d2, L, cx=0, cy=0, cz=0):
+    s = Part.makeCone(d1/2.0, d2/2.0, L)
+    s.Placement = App.Placement(App.Vector(cx - L/2.0, cy, cz), rot_to_x())
+    return s
+
+def sphere_section(R, t, cx):
+    so, si = Part.makeSphere(R), Part.makeSphere(R - t)
+    so.Placement = si.Placement = App.Placement(App.Vector(cx,0,0), App.Rotation())
+    box = Part.makeBox(2*R, 4*R, 4*R, App.Vector(cx, -2*R, -2*R))
+    return so.common(box).cut(si.common(box))
+
+def box_at(l, w, t, x, y, z):
+    b = Part.makeBox(l, w, t); b.translate(App.Vector(x,y,z)); return b
+
+def refine_shape(shp):
+    try: return shp.removeSplitter()
+    except Exception: return shp
+
+      
+
+# ---------------- Construcción externa reforzada ----------------
+tank_cx = 0.0
+
+tank = cyl_x(P["tank_d"], P["tank_len"], cx=tank_cx)
+liner = cyl_x(P["tank_d"] - 2*P["liner_t"], P["tank_len"] - 2*P["liner_t"], cx=tank_cx)
+hull = cyl_x(P["hull_outer_d"], P["tank_len"], cx=tank_cx).cut(tank)
+
+bus_shell = cyl_x(P["bus_outer_d"], P["bus_len"], cx=tank_cx).cut(
+    cyl_x(P["bus_inner_d"], P["bus_len"] - 2*P["hull_t"], cx=tank_cx)
+)
+
+# TPS + Parker
+cap_center_x = tank_cx + P["tank_len"]/2.0 + P["tps_offset"]
+tps_front = sphere_section(P["tps_front_R"], P["tps_front_t"], cap_center_x)
+shoulder_cx = cap_center_x - P["shoulder_len"]/2.0
+shoulder = cone_x(2*P["tps_front_R"], P["hull_outer_d"], P["shoulder_len"], cx=shoulder_cx)
+parker = cyl_x(P["parker_shield_R"]*2.0, 240.0, cx=cap_center_x + P["tps_offset"] + 220.0)
+
+payload_cx = tank_cx + P["tank_len"]/2.0 - P["bus_len"]/2.0
+
+# HGA + mast
+hga_center_x = cap_center_x - P["hga_offset"]
+hga_dish = sphere_section(P["hga_R"], P["hga_t"], hga_center_x)
+hga_mast = cyl_x(P["hga_mast_d"], P["hga_mast_len"], cx=hga_center_x - P["hga_mast_len"]/2.0)
+
+# Pallet
+pallet = box_at(P["inst_bay_len"], P["inst_bay_d"],  P["bulkhead_t"], payload_cx, -P["inst_bay_d"]/2.0, -P["hull_outer_d"]/2.0)
+
+# RTGs
+rtg_solids = []
+for s in (+1, -1):
+    arm = cyl_x(P["rtg_arm_d"], P["rtg_arm_len"], cx=payload_cx - 400.0, cy=s*(P["bus_outer_d"]/2.0 + 600.0), cz=P["rtg_arm_offset_z"])
+    box = box_at(P["rtg_box_l"], P["rtg_box_w"], P["rtg_box_t"],
+                 payload_cx - 400.0 + P["rtg_arm_len"], s*(P["bus_outer_d"]/2.0 + 600.0 - P["rtg_box_w"]/2.0),
+                 P["rtg_arm_offset_z"] - P["rtg_box_t"]/2.0)
+    rtg_solids += [arm, box]
+
+# Booms
+mag_boom = cyl_x(P["mag_boom_d"], P["mag_boom_len"], cx=payload_cx + 300.0, cy=(P["bus_outer_d"]/2.0 + 300.0), cz=300.0)
+star_boom = cyl_x(P["star_boom_d"], P["star_boom_len"], cx=payload_cx + 200.0, cy=-(P["bus_outer_d"]/2.0 + 200.0), cz=250.0)
+
+# RCS/AUX
+rcs_solids = []
+for i in range(P["rcs_count"]):
+    ang = 2*math.pi * i / P["rcs_count"]
+    y = P["rcs_ring_R"] * math.cos(ang); z = P["rcs_ring_R"] * math.sin(ang)
+    rcs_solids.append(cyl_x(P["rcs_thr_d"], P["rcs_thr_len"], cx=payload_cx - 300.0, cy=y, cz=z))
+
+aux_solids = []
+for i in range(P["aux_thr_count"]):
+    ang = 2*math.pi * i / P["aux_thr_count"]
+    y = P["aux_thr_ring_R"] * math.cos(ang); z = P["aux_thr_ring_R"] * math.sin(ang)
+    aux_solids.append(cyl_x(P["aux_thr_d"], P["aux_thr_len"], cx=payload_cx - 900.0, cy=y, cz=z))
+
+# Hall
+hall_solids = []
+for s in (+1, -1):
+    hall_solids.append(cyl_x(P["hall_thr_d"], P["hall_thr_len"], cx=payload_cx + P["hall_arm_len"], cy=s*(P["hull_outer_d"]/2.0 + 900.0), cz=600.0))
+
+# Frame rings (toro delgado)
+frame_rings = []
+frame_count = int(P["bus_len"] // P["frame_step"])
+for i in range(frame_count+1):
+    x = tank_cx - P["bus_len"]/2.0 + i*P["frame_step"]
+    ring = Part.makeTorus(P["frame_ring_d"]/2.0, P["frame_ring_t"]/2.0)
+    ring.Placement = App.Placement(App.Vector(x,0,0), App.Rotation(X_AXIS,90))
+    frame_rings.append(ring)
+
+# Radiación + Whipple
+shield_len = P["rad_shield_len"]; shield_cx = payload_cx
+rad_outer = cyl_x(P["rad_shield_inner_d"] + 2*P["rad_shield_t"], shield_len, cx=shield_cx)
+rad_inner = cyl_x(P["rad_shield_inner_d"], shield_len - 2*P["rad_shield_gap"], cx=shield_cx)
+rad_shell = rad_outer.cut(rad_inner)
+
+whip_outer = cyl_x(P["rad_shield_inner_d"] + P["whipple_t"], shield_len, cx=shield_cx)
+whip_inner = cyl_x(P["rad_shield_inner_d"], shield_len - 2*P["whipple_gap"], cx=shield_cx)
+whip_shell = whip_outer.cut(whip_inner)
+
+# Motor principal
+aft_cx = tank_cx - P["tank_len"]/2.0 - P["engine_bay_len"]/2.0
+gimbal_ring = cyl_x(P["gimbal_ring_ro"]*2.0, P["gimbal_ring_t"], cx=aft_cx)
+nozzle = cone_x(P["exit_d"], P["throat_d"], P["nozzle_len"], cx=aft_cx - P["nozzle_len"]/2.0)
+
+# Radiadores
+rad1 = box_at(P["rad_len"], P["rad_w"], P["rad_t"], payload_cx+1200.0, (P["bus_outer_d"]/2.0+1800.0), P["rad_z"])
+rad2 = box_at(P["rad_len"], P["rad_w"], P["rad_t"], payload_cx+1200.0, -(P["bus_outer_d"]/2.0+1800.0), P["rad_z"])
+rad3 = box_at(P["rad_len"], P["rad_w"], P["rad_t"], payload_cx+1400.0, 0, (P["hull_outer_d"]/2.0+2400.0))
+rad4 = box_at(P["rad_len"], P["rad_w"], P["rad_t"], payload_cx+1400.0, 0, -(P["hull_outer_d"]/2.0+2400.0))
+
+# Fins
+fins = []
+for i in range(4):
+    ang = i*math.pi/2
+    y = (P["exit_d"]/2.0+480.0)*math.cos(ang)
+    z = (P["exit_d"]/2.0+480.0)*math.sin(ang)
+    fins.append(box_at(P["fin_len"], P["fin_w"], P["fin_t"], aft_cx-P["fin_len"]/2.0, y-P["fin_w"]/2.0, z-P["fin_t"]/2.0))
+
+# ---------------- Interior: avionics bay, racks, canales, bulkheads, blindaje ----------------
+# Volumen presurizado interno del bus (avionics bay)
+av_bay_len = P["bus_len"] - 2*P["bulkhead_t"]
+av_bay_w   = P["bus_inner_d"] - 600.0
+av_bay_t   = P["bus_inner_d"] - 800.0
+av_bay = box_at(av_bay_len, av_bay_w, av_bay_t, payload_cx - av_bay_len/2.0, -av_bay_w/2.0, -av_bay_t/2.0)
+
+# Racks modulares (4)
+racks = []
+rack_l, rack_w, rack_h = 800.0, 600.0, 1800.0
+rack_x0 = payload_cx - av_bay_len/2.0 + 300.0
+for i in range(4):
+    rx = rack_x0 + i*(rack_l + 250.0)
+    rack = box_at(rack_l, rack_w, rack_h, rx, -rack_w/2.0, -rack_h/2.0)
+    racks.append(rack)
+
+# Canales de cableado
+harness_ch_1 = cyl_x(220.0, av_bay_len, cx=payload_cx, cy=+700.0, cz=0.0)
+harness_ch_2 = cyl_x(220.0, av_bay_len, cx=payload_cx, cy=-700.0, cz=0.0)
+
+# Bulkheads internos (3)
+bulkheads = []
+for i in range(3):
+    bx = payload_cx - P["bus_len"]/2.0 + (i+1)*(P["bus_len"]/4.0)
+    bulk = Part.makeCylinder(P["bus_inner_d"]/2.0 - 200.0, P["bulkhead_t"])
+    bulk.Placement = App.Placement(App.Vector(bx,0,0), rot_to_x())
+    bulkheads.append(bulk)
+
+# Blindaje interno PE
+pe_shield = box_at(av_bay_len - 600.0, av_bay_w - 400.0, av_bay_t - 400.0,
+                   payload_cx - (av_bay_len - 600.0)/2.0, -(av_bay_w - 400.0)/2.0, -(av_bay_t - 400.0)/2.0)
+
+# ---------------- Huygens integrada ----------------
+huy_body_R = 1600.0; huy_body_t = 280.0
+huy_cone_len = 1400.0; huy_cone_d1 = 1800.0; huy_cone_d2 = 480.0
+huy_center_x = payload_cx + 300.0
+huy_center_y = -(P["inst_bay_d"]/2.0) - 520.0
+huy_center_z = -P["hull_outer_d"]/2.0 - 160.0
+huy_toro = Part.makeTorus(huy_body_R, huy_body_t); huy_toro.Placement = App.Placement(App.Vector(huy_center_x, huy_center_y, huy_center_z), App.Rotation(X_AXIS,90))
+huy_cone = cone_x(huy_cone_d1, huy_cone_d2, huy_cone_len, cx=huy_center_x + huy_cone_len/2.0, cy=huy_center_y, cz=huy_center_z)
+huy_para = cyl_x(680.0, 880.0, cx=huy_center_x-640.0, cy=huy_center_y, cz=huy_center_z+460.0)
+huy_struts = []
+for i in range(4):
+    dy = (-1 if i%2==0 else 1)*420.0
+    dz = (-1 if i//2==0 else 1)*320.0
+    huy_struts.append(cyl_x(160.0, 980.0, cx=payload_cx+150.0, cy=huy_center_y+dy, cz=huy_center_z+dz))
+
+# Antenas LGA/MGA adicionales
+lga_masts = []
+for side in (+1,-1):
+    lga_masts.append(cyl_x(140.0, 1100.0, cx=payload_cx+400.0, cy=side*(P["bus_outer_d"]/2.0+880.0), cz=220.0))
+    lga_masts.append(cyl_x(400.0, 240.0, cx=payload_cx+900.0, cy=side*(P["bus_outer_d"]/2.0+880.0), cz=220.0))
+mga = cyl_x(560.0, 880.0, cx=payload_cx+600.0, cy=-P["bus_outer_d"]/2.0+540.0, cz=-240.0)
+
+# Propulsión iónica en anillo
+ions = []
+for i in range(P["ion_count"]):
+    ang = 2*math.pi*i/P["ion_count"]
+    y = P["ion_ring_R"]*math.cos(ang); z = P["ion_ring_R"]*math.sin(ang)
+    ions.append(cyl_x(P["ion_thr_d"], P["ion_thr_len"], cx=aft_cx-640.0, cy=y, cz=z))
+
+# ---------------- Bandejas electrónicas internas: CubeSat y circulares ----------------
+# Parámetros de bandejas
+tray_count_x = 3; tray_count_y = 2
+tray_gap_x = 280.0; tray_gap_y = 320.0
+tray_cube_l = 620.0; tray_cube_w = 620.0; tray_cube_h = 480.0
+tray_collar_t = 18.0; tray_floor_t = 12.0
+
+tray_x0 = payload_cx - av_bay_len/2.0 + 420.0
+tray_y0 = - (av_bay_w/2.0) + 520.0
+tray_z = -220.0
+
+cube_trays = []
+for ix in range(tray_count_x):
+    for iy in range(tray_count_y):
+        tx = tray_x0 + ix*(tray_cube_l + tray_gap_x)
+        ty = tray_y0 + iy*(tray_cube_w + tray_gap_y)
+        tray_body = box_at(tray_cube_l, tray_cube_w, tray_cube_h, tx, ty, tray_z - tray_cube_h/2.0)
+        collar_outer = box_at(tray_cube_l + 2*tray_collar_t, tray_cube_w + 2*tray_collar_t, tray_collar_t,
+                              tx - tray_collar_t, ty - tray_collar_t, tray_z + tray_cube_h/2.0 - tray_collar_t)
+        tray_floor = box_at(tray_cube_l, tray_cube_w, tray_floor_t,
+                            tx, ty, tray_z - tray_cube_h/2.0 - tray_floor_t)
+        cube_trays += [tray_body, collar_outer, tray_floor]
+
+# Módulos circulares para FPGAs potentes
+circ_mod_count = 4
+circ_mod_d = 520.0; circ_mod_h = 360.0; circ_ring_t = 14.0
+circ_x0 = tray_x0 + 180.0; circ_y = 0.0; circ_z = tray_z + 380.0
+
+circ_trays = []
+for i in range(circ_mod_count):
+    cx = circ_x0 + i*(circ_mod_d + 260.0)
+    can_body = cyl_x(circ_mod_d, circ_mod_h, cx=cx, cy=circ_y, cz=circ_z - circ_mod_h/2.0)
+    ring_top = cyl_x(circ_mod_d + 2*circ_ring_t, circ_ring_t, cx=cx, cy=circ_y, cz=circ_z + circ_mod_h/2.0 - circ_ring_t)
+    ring_bot = cyl_x(circ_mod_d + 2*circ_ring_t, circ_ring_t, cx=cx, cy=circ_y, cz=circ_z - circ_mod_h/2.0 - circ_ring_t)
+    circ_trays += [can_body, ring_top, ring_bot]
+
+# Carriles estructurales (rails) y refuerzos diagonales
+rail_d = 140.0; rail_len = av_bay_len - 800.0
+rails = []
+for side in (+1, -1):
+    rx = payload_cx - rail_len/2.0
+    ry = side*(av_bay_w/2.0 - 220.0); rz = tray_z
+    rails.append(cyl_x(rail_d, rail_len, cx=rx, cy=ry, cz=rz))
+
+diag_struts = []
+for b in bulkheads:
+    bx = b.Placement.Base.x
+    for side in (+1, -1):
+        ry = side*(av_bay_w/2.0 - 220.0)
+        sx = (bx + payload_cx) / 2.0; sz = tray_z + 240.0
+        diag_struts.append(cyl_x(120.0, 900.0, cx=sx, cy=ry, cz=sz))
+
+# Blindaje interno adicional (HDPE multilayer) para bandejas
+pe_layer_t = 60.0
+pe_envelope = box_at(av_bay_len - 900.0, av_bay_w - 700.0, av_bay_t - 700.0,
+                     payload_cx - (av_bay_len - 900.0)/2.0, -(av_bay_w - 700.0)/2.0, -(av_bay_t - 700.0)/2.0)
+
+# ---------------- Fusión: un solo sólido con interior ----------------
+parts = [
+    tank, liner, hull, bus_shell,
+    tps_front, shoulder, parker,
+    hga_dish, hga_mast, pallet,
+    mag_boom, star_boom,
+    rad_shell, whip_shell,
+    gimbal_ring, nozzle,
+    rad1, rad2, rad3, rad4,
+    av_bay, harness_ch_1, harness_ch_2, pe_shield,
+    huy_toro, huy_cone, huy_para
+] + rtg_solids + rcs_solids + aux_solids + hall_solids + frame_rings + fins + huy_struts + lga_masts + ions + racks + bulkheads + cube_trays + circ_trays + rails + diag_struts + [pe_envelope]
+
+solid = parts[0]
+for s in parts[1:]:
+    try:
+        solid = solid.fuse(s)
+    except Exception:
+        solid = refine_shape(solid).fuse(refine_shape(s))
+
+solid = refine_shape(solid)
+sc = add_obj(solid, "CassiniHuygens_Ultra_SOLID_INTEGRATED_ELEC")
+color(sc, (0.68, 0.70, 0.74))
+
+# ---------------- Etiquetas materiales (metadata FEM) ----------------
+def set_matmeta(obj, tag, mat):
+    # Crea propiedades y asigna valores
+    obj.addProperty("App::PropertyString", f"Mat_{tag}_Name", "Materials", "Material name")
+    obj.addProperty("App::PropertyFloat", f"Mat_{tag}_rho", "Materials", "Density")
+    obj.addProperty("App::PropertyFloat", f"Mat_{tag}_E", "Materials", "Young modulus")
+    obj.addProperty("App::PropertyFloat", f"Mat_{tag}_nu", "Materials", "Poisson ratio")
+    setattr(obj, f"Mat_{tag}_Name", mat["name"])
+    setattr(obj, f"Mat_{tag}_rho", mat["rho"])
+    setattr(obj, f"Mat_{tag}_E", mat["E"])
+    setattr(obj, f"Mat_{tag}_nu", mat["nu"])
+
+# Etiquetamos materiales clave (referencia para pipeline FEM)
+set_matmeta(sc, "Hull", MATS["Hull"])
+set_matmeta(sc, "Tank", MATS["Tank"])
+set_matmeta(sc, "Shield", MATS["Shield"])
+set_matmeta(sc, "Whipple", MATS["Whipple"])
+set_matmeta(sc, "Nozzle", MATS["Nozzle"])
+set_matmeta(sc, "Avionics", MATS["Avionics"])
+set_matmeta(sc, "PE", MATS["PE_Shield"])
+set_matmeta(sc, "TrayCube", MATS["TrayCube"])
+set_matmeta(sc, "TrayCirc", MATS["TrayCirc"])
+set_matmeta(sc, "Rail", MATS["Rail"])
+
+# ===== Avionics bay & racks (paramétrico, sólido, FEM-ready) =====
+# Parms
+P.update({
+    "avionics_bay_len": 3600.0,
+    "avionics_bay_d": 5200.0,       # diámetro interno útil dentro del bus
+    "avionics_clear_h": 2400.0,     # altura libre del rack (z local)
+    "rack_w": 620.0,                # ancho útil bandeja
+    "rack_t": 40.0,                 # espesor bandeja
+    "rack_h": 2200.0,               # altura total del rack
+    "rack_count": 6,                # 3 por lado del pasillo
+    "shelf_count": 10,              # número de bandejas por rack
+    "aisle_w": 900.0,               # pasillo central
+    "rail_w": 60.0,
+    "rail_t": 22.0
+})
+
+# Tamaños de componentes (representativos, se ajustan por bandeja)
+COMP_SZ = {
+    "attitude_computers": (540.0, 420.0, 180.0),
+    "sun_sensor_elec": (380.0, 260.0, 140.0),
+    "power_distribution": (560.0, 480.0, 220.0),
+    "power_REU": (520.0, 400.0, 200.0),
+    "power_control": (520.0, 400.0, 180.0),
+    "shunt_regulator": (460.0, 360.0, 160.0),
+    "pyro": (360.0, 260.0, 140.0),
+    "science_cal": (480.0, 360.0, 160.0),
+    "magnetometer_elec": (420.0, 320.0, 160.0),
+    "radio_plasma_wave_elec": (520.0, 420.0, 200.0),
+    "rf_amplifiers": (520.0, 420.0, 200.0),
+    "transponders": (560.0, 440.0, 220.0),
+    "cmd_detectors": (420.0, 320.0, 160.0),
+    "ultra_stable_osc": (340.0, 240.0, 140.0),
+    "telemetry": (520.0, 420.0, 200.0),
+    "control_units": (520.0, 420.0, 200.0),
+    "rf_instr_elec": (520.0, 420.0, 200.0),
+    "CDS_elec": (560.0, 480.0, 220.0),
+    "SSR": (560.0, 480.0, 220.0),
+    "ALF_loader": (420.0, 320.0, 160.0),
+    "reaction_wheel_elec": (520.0, 420.0, 200.0),
+    "remote_sensing_REU": (520.0, 420.0, 200.0),
+    "radar_elec": (560.0, 480.0, 220.0),
+    "imaging_science_elec": (560.0, 480.0, 220.0),
+    "accelerometer_elec": (420.0, 320.0, 160.0),
+    "penthouse_radar_elec": (560.0, 480.0, 220.0)
+}
+
+# Helpers
+def ring_cavity(d, L, cx, wall_t):
+    """Cilindro hueco para bay interno dentro del bus."""
+    outer = cyl_x(d, L, cx=cx)
+    inner = cyl_x(d - 2*wall_t, L - 2*wall_t, cx=cx)
+    return outer.cut(inner)
+
+def make_rail(len_x, w, t, cx, cy, cz, yaw_deg=0.0):
+    r = box_at(len_x, w, t, cx, cy - w/2.0, cz - t/2.0)
+    if yaw_deg != 0.0:
+        r = r.rotate(App.Vector(cx, cy, cz), Z_AXIS, yaw_deg)
+    return r
+
+def make_shelf(w, t, depth, cx, cy, cz):
+    # bandeja con pequeño refuerzo frontal
+    shelf = box_at(depth, w, t, cx - depth/2.0, cy - w/2.0, cz - t/2.0)
+    lip = box_at(20.0, w, t*1.8, cx - depth/2.0 + 10.0, cy - w/2.0, cz - t*0.9)
+    return shelf.fuse(lip)
+
+def place_component(name, sz, cx, cy, cz, rot_deg=0.0):
+    l, w, h = sz
+    comp = box_at(l, w, h, cx - l/2.0, cy - w/2.0, cz - h/2.0)
+    if rot_deg != 0.0:
+        comp = comp.rotate(App.Vector(cx, cy, cz), Z_AXIS, rot_deg)
+    return comp
+
+# Geometría del avionics bay
+bus_center_x = payload_cx
+bay_len = P["avionics_bay_len"]
+bay_d  = P["avionics_bay_d"]
+wall_t = P["bulkhead_t"]
+
+avionics_shell = ring_cavity(bay_d, bay_len, bus_center_x, wall_t)
+
+# Pasillo y posiciones de racks (3 por lado)
+rack_span = (bay_d/2.0) - P["aisle_w"]/2.0 - 120.0  # margen respecto al casco
+side_offsets = [+P["aisle_w"]/2.0 + rack_span/3.0, +P["aisle_w"]/2.0 + 2*rack_span/3.0, +P["aisle_w"]/2.0 + rack_span - 80.0]
+neg_side_offsets = [-o for o in side_offsets]
+rack_y_positions = side_offsets + neg_side_offsets
+
+rack_depth = bay_len - 2*wall_t - 160.0
+rack_top_z = +P["avionics_clear_h"]/2.0
+rack_bot_z = -P["avionics_clear_h"]/2.0
+
+# Construcción de racks: dos raíles verticales + bandejas
+racks = []
+for i, ry in enumerate(rack_y_positions):
+    # raíles verticales (Ti)
+    rail_left  = make_rail(rack_h, P["rail_w"], P["rail_t"], bus_center_x, ry - P["rack_w"]/2.0 - 40.0, rack_bot_z + P["rail_t"]/2.0)
+    rail_right = make_rail(rack_h, P["rail_w"], P["rail_t"], bus_center_x, ry + P["rack_w"]/2.0 + 40.0, rack_bot_z + P["rail_t"]/2.0)
+    # bandejas
+    shelves = []
+    for s in range(P["shelf_count"]):
+        z_shelf = rack_bot_z + 120.0 + s*((rack_top_z - rack_bot_z - 240.0)/max(P["shelf_count"]-1,1))
+        shelf = make_shelf(P["rack_w"], P["rack_t"], rack_depth, bus_center_x, ry, z_shelf)
+        shelves.append(shelf)
+    rack = rail_left.fuse(rail_right)
+    for sh in shelves:
+        rack = rack.fuse(sh)
+    racks.append(rack)
+
+# Mapeo de componentes a bandejas (distribución simple, rotada para encaje)
+components = []
+comp_list = [
+    "attitude_computers","sun_sensor_elec","power_distribution","power_REU","power_control",
+    "shunt_regulator","pyro","science_cal","magnetometer_elec","radio_plasma_wave_elec",
+    "rf_amplifiers","transponders","cmd_detectors","ultra_stable_osc","telemetry",
+    "control_units","rf_instr_elec","CDS_elec","SSR","ALF_loader",
+    "reaction_wheel_elec","remote_sensing_REU","radar_elec","imaging_science_elec",
+    "accelerometer_elec","penthouse_radar_elec"
+]
+
+# asignación round-robin por rack/shelf
+idx = 0
+for i, rack_y in enumerate(rack_y_positions):
+    for s in range(0, P["shelf_count"], 2):  # 1 componente cada 2 bandejas para espacio térmico/arneses
+        if idx >= len(comp_list):
+            break
+        name = comp_list[idx]
+        sz = COMP_SZ[name]
+        cx = bus_center_x
+        cy = rack_y
+        cz = rack_bot_z + 120.0 + s*((rack_top_z - rack_bot_z - 240.0)/max(P["shelf_count"]-1,1))
+        comp = place_component(name, sz, cx, cy, cz, rot_deg=90.0)  # largo orientado en X
+        components.append(comp)
+        idx += 1
+
+# Penthouse: electrónica radar adicional en parte frontal del bay
+penthouse_z = rack_top_z + 240.0
+penthouse = box_at(800.0, bay_d - P["aisle_w"] - 400.0, 240.0,
+                   bus_center_x + bay_len/2.0 - 600.0, - (bay_d - P["aisle_w"])/2.0 + 200.0, penthouse_z - 120.0)
+components.append(penthouse)
+
+# Fusión de racks, componentes y carcasa interna al core
+racks_shp = racks[0]
+for r in racks[1:]:
+    racks_shp.__ior__(r)
+
+components_shp = components[0]
+for c in components[1:]:
+    components_shp.__ior__(c)
+
+avionics_bay = refine_shape(avionics_shell.fuse(racks_shp).fuse(components_shp))
+
+
+# ---------------- Visual y preparación FEM/CFD ----------------
+if hasattr(sc, "ViewObject"):
+    sc.ViewObject.Transparency = 30
+    sc.ViewObject.DisplayMode = "Shaded"
+    sc.ViewObject.ShapeColor = (0.68, 0.70, 0.74)
+
+doc.recompute()
+print("✅ Sólido único integrado con interior electrónico, materiales y refuerzos. Listo para FEM, CFD y radiación solar extrema.")
