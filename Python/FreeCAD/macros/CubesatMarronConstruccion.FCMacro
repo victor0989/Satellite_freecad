@@ -1,0 +1,141 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name = "CassiniUltra_GreenPropulsion_Solid"
+doc = App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label == doc_name else App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# -----------------------------
+# Parámetros
+# -----------------------------
+P = {
+    # Dimensiones principales (mm)
+    "L": 12000.0,            # longitud total
+    "W": 7000.0,             # ancho externo
+    "H": 7000.0,             # alto externo
+    "t_shell": 85.0,         # espesor de carcasa (Ti-6Al-4V)
+
+    # Núcleo monolítico interno (relleno)
+    "core_shrink": 2.0,      # holgura interna para evitar interferencias
+
+    # Refuerzos integrados
+    "ring_step": 1200.0,     # separación de anillos
+    "ring_t": 140.0,         # espesor anillo
+    "ring_w": 600.0,         # ancho radial del anillo
+
+    # Boquilla integrada (perfil cono + transición)
+    "throat_d": 900.0,
+    "exit_d": 5600.0,
+    "nozzle_len": 4600.0,
+
+    # Materiales (densidades kg/m3)
+    "rho_shell": 4430,       # Ti-6Al-4V
+    "rho_core": 2700,        # Al-Li (bloque interno consolidado)
+}
+
+# -----------------------------
+# Utilidades
+# -----------------------------
+def add_obj(shape, name):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    return o
+
+def color(o, rgb):
+    if hasattr(o, "ViewObject"):
+        o.ViewObject.ShapeColor = rgb
+    return o
+
+def box_c(l, w, h, cx=0, cy=0, cz=0):
+    b = Part.makeBox(l, w, h)
+    b.Placement = App.Placement(App.Vector(cx - l/2.0, cy - w/2.0, cz - h/2.0), App.Rotation())
+    return b
+
+# -----------------------------
+# Construcción de sólido sin huecos
+# -----------------------------
+def build_solid():
+    L, W, H, t = P["L"], P["W"], P["H"], P["t_shell"]
+
+    # 1) Carcasa externa (caja) y hueco interno → cascarón continuo
+    outer = box_c(L, W, H, cx=0, cy=0, cz=0)
+    inner = box_c(L - 2*t, W - 2*t, H - 2*t, cx=0, cy=0, cz=0)
+    shell = outer.cut(inner)
+
+    # 2) Núcleo monolítico (relleno: bloque sin cavidades) — watertight
+    shrink = P["core_shrink"]
+    core = box_c(L - 2*(t + shrink), W - 2*(t + shrink), H - 2*(t + shrink), cx=0, cy=0, cz=0)
+
+    # 3) Anillos de refuerzo embebidos (se fusionan al shell para continuidad)
+    rings = []
+    max_rings = int(L / P["ring_step"])
+    for i in range(1, max_rings):
+        x = -L/2.0 + i * P["ring_step"]
+        ring_outer = Part.makeCylinder((W/2.0) - t - P["core_shrink"], P["ring_t"],
+                                       App.Vector(x - P["ring_t"]/2.0, 0, -H/2.0 + t + P["core_shrink"]), App.Vector(1,0,0))
+        # tallar sección interior para formar anillo
+        ring_inner = Part.makeCylinder((W/2.0) - t - P["core_shrink"] - P["ring_w"], P["ring_t"],
+                                       App.Vector(x - P["ring_t"]/2.0, 0, -H/2.0 + t + P["core_shrink"]), App.Vector(1,0,0))
+        ring = ring_outer.cut(ring_inner)
+        rings.append(ring)
+
+    # 4) Boquilla integrada en extremo — se fusiona para cuerpo único
+    throat = P["throat_d"]; exitd = P["exit_d"]; nl = P["nozzle_len"]
+    nozzle_cone = Part.makeCone(throat/2.0, exitd/2.0, nl)
+    nozzle_cone.Placement = App.Placement(App.Vector(-L/2.0 - nl/2.0, 0, 0), App.Rotation(App.Vector(0,1,0), -90))
+
+    # 5) Fusión de todo: shell + core + refuerzos + boquilla → único sólido
+    solid = shell.fuse(core)
+    for r in rings: solid = solid.fuse(r)
+    solid = solid.fuse(nozzle_cone)
+
+    # Limpieza topológica (opcional): small overlaps
+    solid = solid.removeSplitter()
+
+    o = add_obj(solid, "CassiniUltraPropulsor_Solid")
+    color(o, (0.55, 0.60, 0.65))
+    return o
+
+# -----------------------------
+# Masa y densidad (simple por fracciones)
+# -----------------------------
+def compute_mass(o):
+    # Volumen total del sólido (mm^3 → m^3)
+    V_total_m3 = o.Shape.Volume * 1e-9
+
+    # Aproximación de dos materiales: carcasa y núcleo
+    # Estimamos fracciones por volumen según espesores
+    L, W, H, t = P["L"], P["W"], P["H"], P["t_shell"]
+    V_outer = L * W * H
+    V_inner = (L - 2*t) * (W - 2*t) * (H - 2*t)
+    V_shell_mm3 = V_outer - V_inner
+    V_core_mm3  = (L - 2*(t + P["core_shrink"])) * (W - 2*(t + P["core_shrink"])) * (H - 2*(t + P["core_shrink"]))
+    V_shell_m3 = V_shell_mm3 * 1e-9
+    V_core_m3  = V_core_mm3 * 1e-9
+
+    # Ajuste si hay refuerzos y boquilla (sumar a shell)
+    # Estimación: +5% por refuerzos y +3% por boquilla
+    V_shell_m3 *= 1.05
+    V_shell_m3 += V_total_m3 * 0.03
+    # Normalizar si excede total
+    if V_shell_m3 + V_core_m3 > V_total_m3:
+        scale = V_total_m3 / (V_shell_m3 + V_core_m3)
+        V_shell_m3 *= scale
+        V_core_m3  *= scale
+
+    m_shell = V_shell_m3 * P["rho_shell"]
+    m_core  = V_core_m3  * P["rho_core"]
+    m_total = m_shell + m_core
+
+    print(f"Volumen total: {V_total_m3:.4f} m^3")
+    print(f"Volumen shell: {V_shell_m3:.4f} m^3, Volumen core: {V_core_m3:.4f} m^3")
+    print(f"Masa shell: {m_shell:.2f} kg, Masa core: {m_core:.2f} kg")
+    print(f"Masa total (estimada): {m_total:.2f} kg")
+
+# -----------------------------
+# Ejecutar
+# -----------------------------
+o = build_solid()
+compute_mass(o)
+App.ActiveDocument.recompute()
+Gui.SendMsgToActiveView("ViewFit")

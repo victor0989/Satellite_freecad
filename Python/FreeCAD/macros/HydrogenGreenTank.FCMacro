@@ -1,0 +1,317 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name = "GreenCryoTank_Robust"
+doc = App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label == doc_name else App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# ---------------------------
+# Parámetros (mm, kg/m^3) — compacto y grueso
+P = {
+    # Geometría global del casco (cilindro recto + domo superior + base cónica corta)
+    "tank_d": 900.0,           # diámetro exterior del casco (referencia MLI)
+    "tank_h": 1800.0,          # altura cilíndrica principal
+    "dome_h": 220.0,           # altura del domo superior interno
+    "base_cone_h": 240.0,      # altura base cónica inferior (interfaz motor/soporte)
+
+    # Capas (desde dentro hacia fuera): liner -> CFRP -> vacío -> MLI
+    "liner_t": 3.0,            # liner metálico (Al-Li o inox)
+    "cfrp_t": 8.0,             # sobre-envoltura CFRP
+    "vacuum_gap": 25.0,        # cámara de vacío (chaqueta)
+    "mli_t": 12.0,             # espesor equivalente MLI
+
+    # Internos
+    "spraybar_d": 40.0,
+    "spraybar_h": 1450.0,
+    "spray_nozzle_count": 16,
+    "spray_nozzle_d": 10.0,
+    "heatx_w": 90.0,           # intercambiador compacto (placa/aletado simplificado)
+    "heatx_t": 45.0,
+    "heatx_h": 900.0,
+    "baffle_count": 2,
+    "baffle_t": 4.0,
+    "sump_d": 160.0,
+    "sump_h": 100.0,
+
+    # Puertos y válvulas (superiores)
+    "upper_port_d": 70.0,
+    "upper_port_len": 160.0,
+    "exhaust_offset": 140.0,   # +X
+    "vent_offset": -140.0,     # -X
+
+    # Boquilla inferior
+    "lower_nozzle_d": 110.0,
+    "lower_nozzle_len": 160.0,
+
+    # Bomba y J-T externas
+    "pump_d": 220.0,
+    "pump_h": 200.0,
+    "jt_d": 110.0,
+    "jt_h": 140.0,
+
+    # Tubería externa
+    "pipe_d": 70.0,
+    "pipe_len": 420.0,
+
+    # Soporte terrestre con aisladores G10
+    "leg_count": 3,
+    "leg_w": 70.0,
+    "leg_t": 18.0,
+    "leg_h": 380.0,
+    "skid_w": 200.0,
+    "skid_t": 26.0,
+    "skid_len": 700.0,
+    "g10_isolator_t": 10.0,
+
+    # Interfaz motor (espacio)
+    "engine_flange_d": 560.0,
+    "engine_flange_t": 32.0,
+    "throat_d": 220.0,
+    "exit_d": 760.0,
+    "nozzle_len": 520.0,
+
+    # Regiones internas (guías visuales para FEM/CFD)
+    "vapor_h": 420.0,
+    "liquid_h": 1200.0,
+}
+
+# Materiales (densidades kg/m^3) — ajusta según elección
+MAT = {
+    "liner": 2700.0,       # Al-Li (~2700). Si usas inox, cambia a ~8000.
+    "cfrp": 1600.0,        # CFRP
+    "mli": 100.0,          # MLI (equivalente)
+    "g10": 1850.0,         # G10 (aisladores)
+    "titanium": 4500.0,    # brida/interfaz
+    "steel": 7800.0,       # bomba/tobera metálica (aprox)
+}
+
+# ---------------------------
+# Utilidades robustas
+def add_obj(shape, name, color=(0.80,0.82,0.88)):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    if hasattr(o, "ViewObject"):
+        o.ViewObject.ShapeColor = color
+    return o
+
+def cyl(d, h):
+    if d <= 0 or h <= 0: raise ValueError("cyl: parámetros inválidos")
+    return Part.makeCylinder(d/2.0, h)
+
+def safe_cone(d1, d2, h):
+    if h <= 0: raise ValueError("safe_cone: altura inválida")
+    if d1 <= 0 or d2 < 0: raise ValueError("safe_cone: diámetros inválidos")
+    # Si los diámetros son iguales o la diferencia es muy pequeña, usa cilindro
+    if abs(d1 - d2) < 1e-6:
+        return cyl(d1, h)
+    return Part.makeCone(d1/2.0, d2/2.0, h)
+
+def box(l, w, t):
+    if l <= 0 or w <= 0 or t <= 0: raise ValueError("box: parámetros inválidos")
+    return Part.makeBox(l, w, t)
+
+def ring(d_outer, thickness, h):
+    if d_outer <= 0 or thickness <= 0 or h <= 0: raise ValueError("ring: parámetros inválidos")
+    outer = cyl(d_outer, h)
+    inner = cyl(d_outer - 2.0*thickness, h)
+    return outer.cut(inner)
+
+def hollow_layer(outer_d, layer_t, h, z_offset=0.0):
+    if outer_d <= 0 or layer_t < 0 or h <= 0:
+        raise ValueError("hollow_layer: parámetros inválidos")
+    outer = cyl(outer_d, h)
+    if layer_t == 0:
+        shell = outer
+    else:
+        inner = cyl(outer_d - 2.0*layer_t, h - layer_t)
+        inner.translate(App.Vector(0,0,layer_t/2.0))
+        shell = outer.cut(inner)
+    if z_offset != 0.0:
+        shell.translate(App.Vector(0,0,z_offset))
+    return shell
+
+def fuse_all(solids):
+    if not solids: raise ValueError("fuse_all: lista vacía")
+    fused = solids[0]
+    for s in solids[1:]:
+        try:
+            fused = fused.fuse(s)
+        except Exception:
+            fused = Part.makeCompound([fused, s])  # fallback visual
+    return fused
+
+def mass(shape, rho):
+    return shape.Volume * 1e-9 * rho  # mm^3 -> m^3
+
+# ---------------------------
+# Construcción de capas concéntricas — sólidos cerrados sin huecos
+D = P["tank_d"]
+H = P["tank_h"]
+
+# Orden: liner -> CFRP -> vacío -> MLI (desde dentro hacia fuera)
+liner_od = D - 2.0*(P["cfrp_t"] + P["vacuum_gap"] + P["mli_t"])
+if liner_od <= 2.0*P["liner_t"]: raise ValueError("Diámetro del liner insuficiente.")
+
+liner = hollow_layer(liner_od, P["liner_t"], H)
+add_obj(liner, "Liner", (0.85,0.90,0.95))
+
+cfrp_od = D - 2.0*(P["vacuum_gap"] + P["mli_t"])
+cfrp = hollow_layer(cfrp_od, P["cfrp_t"], H)
+add_obj(cfrp, "CFRP_Overwrap", (0.70,0.75,0.80))
+
+vac_od = D - 2.0*(P["mli_t"])
+vac_jacket = hollow_layer(vac_od, P["vacuum_gap"], H)
+add_obj(vac_jacket, "VacuumJacket", (0.78,0.84,0.92))
+
+mli = hollow_layer(D, P["mli_t"], H)
+add_obj(mli, "MLI", (0.75,0.85,0.95))
+
+# Diámetro interno útil (fluido + internos)
+inner_d = liner_od - 2.0*P["liner_t"]
+if inner_d <= 0: raise ValueError("inner_d inválido (capas demasiado gruesas)")
+
+# ---------------------------
+# Domo superior interno (vapor) + guías de regiones
+z_dome = H - P["dome_h"]
+dome_sphere = Part.makeSphere(inner_d/2.0)
+cut_box = box(inner_d, inner_d, inner_d)
+cut_box.translate(App.Vector(-inner_d/2.0, -inner_d/2.0, z_dome - inner_d/2.0))
+dome_sphere.Placement = App.Placement(App.Vector(0,0,z_dome), App.Rotation())
+dome = dome_sphere.common(cut_box)
+add_obj(dome, "InnerVaporDome", (0.90,0.92,1.0))
+
+vapor_guide = cyl(inner_d, P["vapor_h"])
+vapor_guide.translate(App.Vector(0,0,z_dome - P["vapor_h"]))
+add_obj(vapor_guide, "VaporRegion_Guide", (0.62,0.80,1.0))
+
+liquid_guide = cyl(inner_d, P["liquid_h"])
+liquid_guide.translate(App.Vector(0,0,60.0))
+add_obj(liquid_guide, "LiquidRegion_Guide", (0.60,0.90,0.90))
+
+# ---------------------------
+# Spray bar central + boquillas
+spraybar = cyl(P["spraybar_d"], P["spraybar_h"])
+spraybar.translate(App.Vector(0,0,80.0))
+add_obj(spraybar, "SprayBar", (0.82,0.85,0.90))
+
+for i in range(P["spray_nozzle_count"]):
+    z = 100.0 + (P["spraybar_h"] - 200.0) * i / max(1,(P["spray_nozzle_count"]-1))
+    ang = i * (2.0 * math.pi / P["spray_nozzle_count"])
+    r = (inner_d/2.0) - 35.0
+    x = r * math.cos(ang); y = r * math.sin(ang)
+    noz = cyl(P["spray_nozzle_d"], 30.0)
+    noz.Placement = App.Placement(App.Vector(x, y, z), App.Rotation(App.Vector(0,0,1), math.degrees(ang)))
+    add_obj(noz, f"Nozzle_{i+1:02d}", (0.80,0.90,0.95))
+
+# ---------------------------
+# Intercambiador compacto y baffles anti-slosh
+hx = box(P["heatx_w"], P["heatx_t"], P["heatx_h"])
+hx.translate(App.Vector(inner_d/2.0 - P["heatx_w"] - 25.0, -P["heatx_t"]/2.0, H/2.0 - P["heatx_h"]/2.0))
+add_obj(hx, "HeatExchanger", (0.72,0.85,0.90))
+
+for i in range(P["baffle_count"]):
+    z = 220.0 + i * (P["liquid_h"] - 200.0) / max(1,(P["baffle_count"]-1))
+    disk = ring(inner_d, P["baffle_t"], 5.0)
+    disk.translate(App.Vector(0,0,z))
+    add_obj(disk, f"Baffle_{i+1}", (0.76,0.80,0.86))
+
+# ---------------------------
+# Sumidero y boquilla inferior
+sump = cyl(P["sump_d"], P["sump_h"])
+sump.translate(App.Vector(0,0,40.0))
+add_obj(sump, "Sump", (0.80,0.86,0.92))
+
+lower_nozzle = cyl(P["lower_nozzle_d"], P["lower_nozzle_len"])
+lower_nozzle.translate(App.Vector(0,0,40.0 - P["lower_nozzle_len"]))
+add_obj(lower_nozzle, "LowerNozzle", (0.72,0.76,0.82))
+
+# ---------------------------
+# Valvulería superior (exhaust/venting)
+for name, xoff in [("ExhaustValvePort", P["exhaust_offset"]), ("VentingValvePort", P["vent_offset"])]:
+    port = cyl(P["upper_port_d"], P["upper_port_len"])
+    port.rotate(App.Vector(0,0,z_dome + 20.0), App.Vector(0,1,0), 90)
+    port.translate(App.Vector(xoff, 0, z_dome + 20.0))
+    add_obj(port, name, (0.74,0.76,0.82))
+
+# ---------------------------
+# Bomba externa y válvula J-T
+pump = cyl(P["pump_d"], P["pump_h"])
+pump.translate(App.Vector(0,0,-P["pump_h"]))
+add_obj(pump, "CryogenicPump", (0.66,0.72,0.80))
+
+jt = cyl(P["jt_d"], P["jt_h"])
+jt.rotate(App.Vector(P["jt_d"],0,0), App.Vector(0,1,0), 90)
+jt.translate(App.Vector(D/2.0 + 100.0, 0, 160.0))
+add_obj(jt, "JT_Valve", (0.70,0.80,0.90))
+
+# Tuberías externas
+for idx, z in enumerate([120.0, H/2.0]):
+    pipe = cyl(P["pipe_d"], P["pipe_len"])
+    pipe.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+    pipe.translate(App.Vector(D/2.0 + 70.0, 0, z))
+    add_obj(pipe, f"ExternalPipe_{idx+1}", (0.76,0.82,0.88))
+
+# ---------------------------
+# Base cónica robusta e interfaz motor
+base_cone = safe_cone(D - 2.0*(P["mli_t"] + P["vacuum_gap"]), D*0.65, P["base_cone_h"])
+base_cone.translate(App.Vector(0,0,-P["base_cone_h"]))
+add_obj(base_cone, "BaseCone", (0.72,0.74,0.78))
+
+engine_flange = ring(P["engine_flange_d"], P["engine_flange_t"], P["engine_flange_t"])
+engine_flange.translate(App.Vector(0,0,-P["base_cone_h"] - P["engine_flange_t"]))
+add_obj(engine_flange, "EngineFlange_Titanium", (0.72,0.76,0.80))
+
+engine_nozzle = safe_cone(P["exit_d"], P["throat_d"], P["nozzle_len"])
+engine_nozzle.translate(App.Vector(0,0,-P["base_cone_h"] - 2.0*P["engine_flange_t"] - P["nozzle_len"]))
+add_obj(engine_nozzle, "EngineNozzle", (0.62,0.66,0.74))
+
+# ---------------------------
+# Soporte terrestre con aisladores G10
+for i in range(P["leg_count"]):
+    ang = i * 360.0 / P["leg_count"]
+    rad = (D/2.0) - 30.0
+    # aislador G10
+    isol = box(P["g10_isolator_t"], P["leg_w"], P["leg_t"])
+    isol.Placement = App.Placement(App.Vector(rad, -P["leg_w"]/2.0, -P["leg_t"]/2.0), App.Rotation(App.Vector(0,0,1), ang))
+    add_obj(isol, f"G10_Isolator_{i+1}", (0.85,0.82,0.76))
+    # pata
+    leg = box(P["leg_t"], P["leg_w"], P["leg_h"])
+    leg.Placement = App.Placement(App.Vector(rad, -P["leg_w"]/2.0, -P["leg_h"] - P["leg_t"]), App.Rotation(App.Vector(0,0,1), ang))
+    add_obj(leg, f"Leg_{i+1}", (0.64,0.72,0.80))
+    # patín
+    skid = box(P["skid_len"], P["skid_w"], P["skid_t"])
+    skid.Placement = App.Placement(App.Vector(rad + 30.0, -P["skid_w"]/2.0, -P["leg_h"] - P["skid_t"] - P["leg_t"]),
+                                   App.Rotation(App.Vector(0,0,1), ang))
+    add_obj(skid, f"Skid_{i+1}", (0.58,0.66,0.74))
+
+# ---------------------------
+# Fusión para masa/CG — solo sólidos válidos, sin Compound
+solids_for_mass = [liner, cfrp, mli, base_cone, engine_flange, engine_nozzle]
+fused_mass_shape = fuse_all(solids_for_mass)
+
+# Reporte de masas y CG
+total_m = 0.0
+cm_sum = App.Vector(0,0,0)
+for (name, shp, rho) in [
+    ("Liner", liner, MAT["liner"]),
+    ("CFRP", cfrp, MAT["cfrp"]),
+    ("MLI", mli, MAT["mli"]),
+    ("BaseCone", base_cone, MAT["steel"]),
+    ("EngineFlange_Titanium", engine_flange, MAT["titanium"]),
+    ("EngineNozzle", engine_nozzle, MAT["steel"]),
+]:
+    m = mass(shp, rho)
+    cm = shp.CenterOfMass
+    total_m += m
+    cm_sum = App.Vector(cm_sum.x + cm.x*m, cm_sum.y + cm.y*m, cm_sum.z + cm.z*m)
+    rep_item = doc.addObject("App::FeaturePython", f"Mass_{name}")
+    rep_item.Label = f"{name}: {m:.1f} kg"
+
+if total_m > 0:
+    cm_global = App.Vector(cm_sum.x/total_m, cm_sum.y/total_m, cm_sum.z/total_m)
+    rep_total = doc.addObject("App::FeaturePython", "Mass_Total")
+    rep_total.Label = f"Total mass (selected solids): {total_m:.1f} kg; CG z={cm_global.z:.1f} mm"
+
+# Vista
+Gui.ActiveDocument.ActiveView.fitAll()
+App.ActiveDocument.recompute()

@@ -1,0 +1,292 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name="CassiniUltra_GreenPropulsor_Industrial"
+doc=App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label==doc_name else App.newDocument(doc_name)
+doc=App.ActiveDocument
+
+# -----------------------------
+# Parámetros base CassiniUltra
+# -----------------------------
+P={
+    # Envolvente nave (alargada, lista para lanzamiento)
+    "hull_outer_d":7000.0,
+    "hull_t":85.0,
+    "tank_len":11000.0,
+    "tank_d":6000.0,
+    "liner_t":36.0,
+
+    # TPS y hombro frontal (cúpula)
+    "tps_front_R":4200.0,
+    "tps_front_t":220.0,
+    "tps_offset":780.0,
+    "shoulder_len":1600.0,
+
+    # Bus y anillos estructurales
+    "bus_len":5200.0,
+    "bus_outer_d":6800.0,
+    "bus_inner_d":5600.0,
+    "frame_ring_d":4600.0,
+    "frame_ring_t":140.0,
+    "frame_step":800.0,
+    "bulkhead_t":90.0,
+
+    # Escudos radiación/Whipple
+    "shield_shape":"box",
+    "rad_shield_inner_d":7600.0,
+    "rad_shield_len":7600.0,
+    "rad_shield_gap":120.0,
+    "whipple_t":80.0,
+    "whipple_gap":300.0,
+    "shield_box_L":7600.0,
+    "shield_box_W":7600.0,
+    "shield_box_H":7600.0,
+
+    # Propulsión principal (boquilla + gimbal)
+    "throat_d":900.0,
+    "exit_d":5600.0,
+    "nozzle_len":4600.0,
+    "gimbal_ring_ro":2800.0,
+    "gimbal_ring_t":160.0,
+
+    # Automatismos y fluidos (COTS)
+    "pump_d":420.0,         # micro/e-pump diámetro (mm)
+    "pump_L":900.0,
+    "valve3_box":(420.0,320.0,320.0),
+    "fcv_box":(360.0,280.0,280.0),
+    "check_valve_d":180.0,
+    "filter_d":220.0,
+    "manifold_box":(620.0,360.0,280.0),
+    "tube_d":120.0,         # líneas principales
+    "tube_small_d":60.0,    # líneas de medida/venteo
+
+    # Sensores y actuadores
+    "pressure_sensor_d":120.0,
+    "temp_sensor_d":80.0,
+    "actuator_box":(280.0,220.0,180.0),
+
+    # ECU y bandejas
+    "ecu_box":(1200.0,900.0,420.0),
+    "tray_t":90.0,
+
+    # RCS/auxiliares
+    "rcs_thr_d":520.0,
+    "rcs_thr_len":900.0,
+    "rcs_ring_R":4200.0,
+    "rcs_count":12,
+
+    # Otros subsistemas (como tu CassiniUltra)
+    "hga_R":2800.0,"hga_t":32.0,"hga_offset":880.0,
+    "hga_mast_len":2000.0,"hga_mast_d":320.0,
+    "rtg_box_l":1600.0,"rtg_box_w":920.0,"rtg_box_t":420.0,
+    "rtg_arm_len":1650.0,"rtg_arm_d":320.0,"rtg_arm_offset_z":1400.0,
+    "rad_len":3200.0,"rad_w":1400.0,"rad_t":90.0,"rad_z":1800.0,
+    "parker_shield_R":3200.0,
+
+    # Colores (solo visual)
+    "col_liner":(0.60,0.60,0.65),
+    "col_hull":(0.55,0.55,0.60),
+    "col_shield":(0.80,0.80,0.80),
+    "col_pump":(0.45,0.45,0.55),
+    "col_valve":(0.55,0.55,0.65),
+    "col_tube":(0.75,0.75,0.75),
+    "col_sensor":(0.75,0.60,0.55),
+    "col_actuator":(0.40,0.50,0.75),
+    "col_ecu":(0.35,0.35,0.55),
+    "col_tray":(0.50,0.50,0.55)
+}
+
+MATS={
+    "Hull":{"name":"Ti-6Al-4V","rho":4430,"E":114e9,"nu":0.34},
+    "Tank":{"name":"Al-Li 2195","rho":2700,"E":73e9,"nu":0.33},
+    "Shield":{"name":"CFRP+PE+W","rho":1900,"E":60e9,"nu":0.28},
+    "Whipple":{"name":"Al 6061-T6","rho":2700,"E":69e9,"nu":0.33},
+    "Nozzle":{"name":"C/SiC","rho":2600,"E":300e9,"nu":0.15},
+    "Avionics":{"name":"Al Frame + PCB","rho":2200,"E":50e9,"nu":0.30},
+    "Tubing":{"name":"SS316L","rho":8000},
+    "PE_Shield":{"name":"HDPE","rho":950,"E":1.1e9,"nu":0.42}
+}
+
+# -----------------------------
+# Utilidades CassiniUltra
+# -----------------------------
+X_AXIS=App.Vector(1,0,0);Y_AXIS=App.Vector(0,1,0);Z_AXIS=App.Vector(0,0,1)
+rot_to_x=lambda:App.Rotation(Y_AXIS,90)
+def add_obj(s,n):o=doc.addObject("Part::Feature",n);o.Shape=s;return o
+def color(o,rgb): 
+    if hasattr(o,"ViewObject"):o.ViewObject.ShapeColor=rgb;return o
+def cyl_x(d,L,cx=0,cy=0,cz=0):s=Part.makeCylinder(d/2.0,L);s.Placement=App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x());return s
+def cone_x(d1,d2,L,cx=0,cy=0,cz=0):s=Part.makeCone(d1/2.0,d2/2.0,L);s.Placement=App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x());return s
+def sphere_section(R,t,cx):so,si=Part.makeSphere(R),Part.makeSphere(R-t);so.Placement=si.Placement=App.Placement(App.Vector(cx,0,0),App.Rotation());box=Part.makeBox(2*R,4*R,4*R,App.Vector(cx,-2*R,-2*R));return so.common(box).cut(si.common(box))
+def box_at(l,w,t,x,y,z):b=Part.makeBox(l,w,t);b.translate(App.Vector(x,y,z));return b
+def box_x(l,w,h,cx=0,cy=0,cz=0):b=Part.makeBox(l,w,h);b.Placement=App.Placement(App.Vector(cx-l/2.0,cy-w/2.0,cz-h/2.0),App.Rotation());return b
+
+# -----------------------------
+# Escudos multilayer (cyl/box)
+# -----------------------------
+def multilayer_shield_cyl(cx,L,inner_d,layers):
+    shapes=[];current_d=inner_d
+    for t,col,name in layers:
+        outer=cyl_x(current_d+2*t,L,cx=cx)
+        inner=cyl_x(current_d,L-2*P["rad_shield_gap"],cx=cx)
+        layer=outer.cut(inner)
+        shapes.append(color(add_obj(layer,name),col))
+        current_d+=2*t
+    return shapes,current_d
+
+def multilayer_shield_box(cx,L,W,H,layers):
+    shapes=[];curL,curW,curH=L,W,H
+    for t,col,name in layers:
+        outer=box_x(curL+2*t,curW+2*t,curH+2*t,cx=cx)
+        inner=box_x(curL,curW,curH,cx=cx)
+        layer=outer.cut(inner)
+        shapes.append(color(add_obj(layer,name),col))
+        curL,curW,curH=curL+2*t,curW+2*t,curH+2*t
+    return shapes,(curL,curW,curH)
+
+# -----------------------------
+# Automatismos industriales COTS
+# -----------------------------
+def build_pump(cx,cy,cz): 
+    p=cyl_x(P["pump_d"],P["pump_L"],cx=cx,cy=cy,cz=cz); 
+    return color(add_obj(p,"Micro_ePump"),P["col_pump"])
+
+def build_valve3(cx,cy,cz):
+    l,w,h=P["valve3_box"]; v=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(v,"Valve_3Way"),P["col_valve"])
+
+def build_fcv(cx,cy,cz):
+    l,w,h=P["fcv_box"]; v=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(v,"Thruster_FCV"),P["col_valve"])
+
+def build_manifold(cx,cy,cz):
+    l,w,h=P["manifold_box"]; m=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(m,"Manifold"),P["col_valve"])
+
+def build_check_valve(cx,cy,cz):
+    cv=cyl_x(P["check_valve_d"],240.0,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(cv,"CheckValve"),(0.6,0.6,0.6))
+
+def build_filter(cx,cy,cz):
+    f=cyl_x(P["filter_d"],280.0,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(f,"InlineFilter"),(0.7,0.7,0.7))
+
+def tube_between(p1,p2,d,name):
+    v=App.Vector(p2[0]-p1[0],p2[1]-p1[1],p2[2]-p1[2]); L=v.Length if v.Length>1e-6 else 1e-6
+    tube=Part.makeCylinder(d/2.0,L)
+    axis=App.Vector(0,0,1).cross(v); angle=math.degrees(App.Vector(0,0,1).getAngle(v))
+    tube.Placement=App.Placement(App.Vector(p1[0],p1[1],p1[2]),App.Rotation(axis,angle))
+    return color(add_obj(tube,name),P["col_tube"])
+
+def build_pressure_sensor(cx,cy,cz):
+    s=cyl_x(P["pressure_sensor_d"],160.0,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(s,"PressureSensor"),P["col_sensor"])
+
+def build_temp_sensor(cx,cy,cz):
+    s=cyl_x(P["temp_sensor_d"],120.0,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(s,"TempSensor"),P["col_sensor"])
+
+def build_actuator(cx,cy,cz):
+    l,w,h=P["actuator_box"]; a=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(a,"LinearActuator"),P["col_actuator"])
+
+# -----------------------------
+# Construcción principal nave
+# -----------------------------
+tank_cx=0.0
+tank=cyl_x(P["tank_d"],P["tank_len"],cx=tank_cx); color(add_obj(tank,"Tank"),(0.75,0.75,0.8))
+layers=[(80.0,(0.9,0.9,0.6),"PE_Layer"),
+        (60.0,(0.3,0.3,0.3),"CFRP_Layer"),
+        (40.0,(0.5,0.5,0.7),"W_Layer")]
+
+if P["shield_shape"]=="cyl":
+    shield_layers,final_d=multilayer_shield_cyl(tank_cx,P["rad_shield_len"],P["rad_shield_inner_d"],layers)
+    whipple_outer=cyl_x(P["rad_shield_inner_d"]+2*(sum([l[0] for l in layers])+P["whipple_gap"]),P["rad_shield_len"],cx=tank_cx)
+    whipple_inner=cyl_x(P["rad_shield_inner_d"]+2*(sum([l[0] for l in layers])+P["whipple_gap"]-P["whipple_t"]),P["rad_shield_len"],cx=tank_cx)
+    whipple=whipple_outer.cut(whipple_inner); color(add_obj(whipple,"WhippleShield"),P["col_shield"])
+else:
+    shield_layers,(curL,curW,curH)=multilayer_shield_box(tank_cx,P["shield_box_L"],P["shield_box_W"],P["shield_box_H"],layers)
+    whL,whW,whH=curL+2*P["whipple_gap"],curW+2*P["whipple_gap"],curH+2*P["whipple_gap"]
+    whL_in,whW_in,whH_in=whL-2*P["whipple_t"],whW-2*P["whipple_t"],whH-2*P["whipple_t"]
+    whipple_outer=box_x(whL,whW,whH,cx=tank_cx); whipple_inner=box_x(whL_in,whW_in,whH_in,cx=tank_cx)
+    whipple=whipple_outer.cut(whipple_inner); color(add_obj(whipple,"WhippleShieldBox"),P["col_shield"])
+
+# TPS frontal y hombro
+cap_center_x=tank_cx+P["tank_len"]/2.0+P["tps_offset"]
+tps_front=sphere_section(P["tps_front_R"],P["tps_front_t"],cap_center_x); color(add_obj(tps_front,"TPS_Front"),(0.85,0.85,0.9))
+shoulder_cx=cap_center_x-P["shoulder_len"]/2.0
+shoulder=cone_x(2*P["tps_front_R"],P["hull_outer_d"],P["shoulder_len"],cx=shoulder_cx); color(add_obj(shoulder,"TPS_Shoulder"),(0.7,0.7,0.75))
+
+# Liner y hull
+liner=cyl_x(P["tank_d"]-2*P["liner_t"],P["tank_len"]-2*P["liner_t"],cx=tank_cx); color(add_obj(liner,"TankLiner"),P["col_liner"])
+hull=cyl_x(P["hull_outer_d"],P["tank_len"],cx=tank_cx).cut(tank); color(add_obj(hull,"Hull"),P["col_hull"])
+
+# Bus y anillos estructurales
+bus_shell=cyl_x(P["bus_outer_d"],P["bus_len"],cx=tank_cx).cut(cyl_x(P["bus_inner_d"],P["bus_len"]-2*P["hull_t"],cx=tank_cx))
+color(add_obj(bus_shell,"BusShell"),(0.55,0.55,0.6))
+# Frame rings cada frame_step
+for k in range(int(P["bus_len"]/P["frame_step"])):
+    cx_ring=tank_cx - P["bus_len"]/2.0 + k*P["frame_step"]
+    ring=cyl_x(P["frame_ring_d"],P["frame_ring_t"],cx=cx_ring)
+    ring=ring.cut(cyl_x(P["frame_ring_d"]-2*P["frame_ring_t"],P["frame_ring_t"],cx=cx_ring))
+    color(add_obj(ring,f"FrameRing_{k}"),(0.5,0.5,0.55))
+
+# HGA y mástil
+hga_mast=cyl_x(P["hga_mast_d"],P["hga_mast_len"],cx=cap_center_x+P["hga_offset"]); color(add_obj(hga_mast,"HGAMast"),(0.6,0.6,0.65))
+disk=Part.makeCylinder(P["hga_R"],P["hga_t"])
+disk.Placement=App.Placement(App.Vector(cap_center_x+P["hga_offset"]+P["hga_mast_len"],0,-P["hga_R"]/2.0),App.Rotation(Y_AXIS,90))
+color(add_obj(disk,"HGA"),(0.9,0.9,0.9))
+
+# RTG y radiadores
+rtg_center_x=tank_cx-P["tank_len"]/2.0-P["rtg_arm_len"]/2.0
+rtg_box=box_at(P["rtg_box_l"],P["rtg_box_w"],P["rtg_box_t"],rtg_center_x,0,-P["rtg_arm_offset_z"])
+rtg_arm=cyl_x(P["rtg_arm_d"],P["rtg_arm_len"],cx=rtg_center_x)
+color(add_obj(rtg_arm.fuse(rtg_box),"RTGAssembly"),(0.8,0.7,0.5))
+rad1=box_at(P["rad_len"],P["rad_w"],P["rad_t"],tank_cx+P["tank_len"]/3.0,0,P["rad_z"])
+rad2=box_at(P["rad_len"],P["rad_w"],P["rad_t"],tank_cx+P["tank_len"]/3.0,0,-P["rad_z"])
+color(add_obj(rad1.fuse(rad2),"Radiators"),(0.8,0.9,1.0))
+
+# Boquilla y gimbal
+nozzle_axis_cx=tank_cx-P["tank_len"]/2.0-P["nozzle_len"]/2.0
+nozzle=cyl_x(P["exit_d"],P["nozzle_len"],cx=nozzle_axis_cx).cut(cone_x(P["exit_d"],P["throat_d"],P["nozzle_len"],cx=nozzle_axis_cx))
+color(add_obj(nozzle,"Nozzle"),(0.4,0.4,0.45))
+gimbal_cx=tank_cx-P["tank_len"]/2.0-P["nozzle_len"]-P["gimbal_ring_t"]/2.0
+gimbal_ring=cyl_x(P["gimbal_ring_ro"],P["gimbal_ring_t"],cx=gimbal_cx).cut(cyl_x(P["gimbal_ring_ro"]-P["gimbal_ring_t"],P["gimbal_ring_t"],cx=gimbal_cx))
+color(add_obj(gimbal_ring,"GimbalRing"),(0.6,0.6,0.65))
+
+# -----------------------------
+# Bloque de automatismos (arriba del bus)
+# -----------------------------
+auto_cx=tank_cx+P["bus_len"]/2.0-800.0
+pump=build_pump(auto_cx,0,0)
+v3=build_valve3(auto_cx+420.0,0,-160.0)
+fcv=build_fcv(auto_cx,420.0,-320.0)
+mani=build_manifold(auto_cx-420.0,0,-480.0)
+cv =build_check_valve(auto_cx-220.0,220.0,-240.0)
+flt=build_filter(auto_cx-220.0,-220.0,-240.0)
+
+# Sensores y actuadores
+ps =build_pressure_sensor(auto_cx+220.0,0,-90.0)
+ts =build_temp_sensor(auto_cx-220.0,0,-90.0)
+act=build_actuator(auto_cx+620.0,0,-260.0)
+
+# Tuberías principales y de medida
+tube_between((auto_cx,0,0),(auto_cx-420.0,0,-480.0),P["tube_d"],"Tube_Pump_Manifold")
+tube_between((auto_cx+420.0,0,-160.0),(auto_cx-420.0,0,-480.0),P["tube_d"],"Tube_V3_Manifold")
+tube_between((auto_cx,420.0,-320.0),(nozzle_axis_cx,0,0),P["tube_d"],"Tube_FCV_Thruster")
+tube_between((auto_cx-220.0,220.0,-240.0),(auto_cx-420.0,0,-480.0),P["tube_small_d"],"Tube_Check_Manifold")
+tube_between((auto_cx-220.0,-220.0,-240.0),(auto_cx-420.0,0,-480.0),P["tube_small_d"],"Tube_Filter_Manifold")
+tube_between((auto_cx+220.0,0,-90.0),(auto_cx-420.0,0,-480.0),P["tube_small_d"],"Tube_Pressure_Tap")
+tube_between((auto_cx-220.0,0,-90.0),(auto_cx-420.0,0,-480.0),P["tube_small_d"],"Tube_Temp_Tap")
+
+# ECU y bandeja de electrónica
+ecu=box_x(*P["ecu_box"],cx=auto_cx+900.0,cy=0,cz=-180.0)
+color(add_obj(ecu,"ECU"),P["col_ecu"])
+tray=box_x(1800.0,1200.0,P["tray_t"],cx=auto_cx+900.0,cy=0,cz=-240.0)
+color(add_obj(tray,"AvionicsTray"),P["col_tray"])
+
+# -----------------------------
+# Recompute y ajuste de vista
+# -----------------------------
+App.ActiveDocument.recompute()
+Gui.SendMsgToActiveView("ViewFit")

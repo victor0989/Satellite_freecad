@@ -1,0 +1,65 @@
+import FreeCAD as App
+import Part, math
+
+doc = App.newDocument("MIMPS_GreenPropulsion")
+
+# -------------------
+# Parámetros globales
+# -------------------
+frame_size = 100.0    # mm (1U CubeSat)
+wall_thickness = 3.0  # mm
+tank_radius = 35.0    # mm (aprox para 420 cm3)
+tank_height = 110.0   # mm
+pmd_fraction = 0.15   # 15% volumen reservado
+ullage_fraction = 0.05
+
+# -------------------
+# Estructura externa
+# -------------------
+outer_box = Part.makeBox(frame_size, frame_size, frame_size)
+inner_box = Part.makeBox(frame_size-2*wall_thickness,
+                         frame_size-2*wall_thickness,
+                         frame_size-2*wall_thickness)
+inner_box.translate(App.Vector(wall_thickness, wall_thickness, wall_thickness))
+frame = outer_box.cut(inner_box)
+
+# -------------------
+# Tanque principal
+# -------------------
+tank = Part.makeCylinder(tank_radius, tank_height)
+tank.translate(App.Vector(frame_size/2, frame_size/2, -tank_height/2))
+
+# Volumen útil del tanque
+tank_volume = math.pi * tank_radius**2 * tank_height / 1000.0  # cm3
+usable_volume = tank_volume * (1 - (pmd_fraction + ullage_fraction))
+
+print("Volumen tanque total [cm3]:", round(tank_volume,2))
+print("Volumen útil [cm3]:", round(usable_volume,2))
+
+# -------------------
+# PMD (simplificado como inserto interno)
+# -------------------
+pmd = Part.makeCylinder(tank_radius*0.9, tank_height*0.1)
+pmd.translate(App.Vector(frame_size/2, frame_size/2, -tank_height/2))
+
+# -------------------
+# Micro e-pump y válvulas
+# -------------------
+pump = Part.makeCylinder(8, 20)
+pump.translate(App.Vector(frame_size/2, frame_size/2, frame_size-20))
+
+valve = Part.makeBox(10, 10, 10)
+valve.translate(App.Vector(frame_size/2-5, frame_size/2-5, frame_size-30))
+
+# -------------------
+# Thruster (boquilla cónica)
+# -------------------
+thruster = Part.makeCone(5, 15, 25)
+thruster.translate(App.Vector(frame_size/2, frame_size/2, -tank_height))
+
+# -------------------
+# Ensamblaje
+# -------------------
+assembly = frame.fuse([tank, pmd, pump, valve, thruster])
+Part.show(assembly)
+doc.recompute()

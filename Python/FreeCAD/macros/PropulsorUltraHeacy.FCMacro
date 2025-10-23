@@ -1,0 +1,59 @@
+import FreeCAD as App
+import Part
+
+doc = App.newDocument("Propulsor_CubeSat")
+
+# -------------------
+# Parámetros globales
+# -------------------
+frame_size = 100.0    # mm (lado del CubeSat)
+frame_thickness = 3.0 # grosor de placas
+cyl_radius = 20.0     # radio del propulsor interno
+cyl_length = 66.3     # longitud del propulsor
+support_thickness = 4.0
+
+# -------------------
+# Estructura externa
+# -------------------
+# Marco cúbico (placas superior e inferior)
+top_plate = Part.makeBox(frame_size, frame_size, frame_thickness)
+top_plate.translate(App.Vector(0,0,frame_size-frame_thickness))
+
+bottom_plate = Part.makeBox(frame_size, frame_size, frame_thickness)
+
+# Cuatro columnas en las esquinas
+columns = []
+col_size = 6.0
+for x in [0, frame_size-col_size]:
+    for y in [0, frame_size-col_size]:
+        col = Part.makeBox(col_size, col_size, frame_size)
+        col.translate(App.Vector(x,y,0))
+        columns.append(col)
+
+# -------------------
+# Estructura interna
+# -------------------
+# Cilindro central (propulsor/tanque)
+cylinder = Part.makeCylinder(cyl_radius, cyl_length)
+cylinder.translate(App.Vector(frame_size/2, frame_size/2, -cyl_length))
+
+# Soportes radiales (ejemplo: 4 brazos en cruz)
+supports = []
+for angle in [0,90,180,270]:
+    arm = Part.makeBox(support_thickness, 20, 20)
+    arm.translate(App.Vector(frame_size/2 - support_thickness/2,
+                             frame_size/2 - 10, frame_size/2 - 10))
+    arm.rotate(App.Vector(frame_size/2, frame_size/2, frame_size/2),
+               App.Vector(0,0,1), angle)
+    supports.append(arm)
+
+# -------------------
+# Ensamblaje
+# -------------------
+assembly = top_plate.fuse(bottom_plate)
+for col in columns: assembly = assembly.fuse(col)
+assembly = assembly.fuse(cylinder)
+for arm in supports: assembly = assembly.fuse(arm)
+
+Part.show(assembly)
+doc.recompute()

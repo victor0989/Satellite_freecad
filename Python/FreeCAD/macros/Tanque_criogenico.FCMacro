@@ -1,0 +1,281 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part
+
+doc_name = "GreenCryoTank_Multiuse"
+doc = App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label == doc_name else App.newDocument(doc_name)
+doc = App.ActiveDocument
+
+# ---------------------------
+# Parámetros (mm, kg/m^3)
+# Compacto, grueso, tanque vertical multiuso
+P = {
+    # Geometría principal
+    "tank_d": 1400.0,          # diámetro exterior tanque
+    "tank_h": 2600.0,          # altura total tanque (incluye base cónica parcial)
+    "dome_h": 300.0,           # altura cúpula superior interna
+    "cone_h": 350.0,           # altura base cónica externa (refuerzo + interfaz motor)
+    "wall_t": 30.0,            # pared metálica (ej. acero inoxidable)
+    "liner_t": 6.0,            # liner interno (compatibilidad química)
+    "insul_t": 40.0,           # aislamiento multicapa (MLI/aerogel equivalente)
+    # Regiones internas
+    "vapor_h": 500.0,
+    "liquid_h": 1700.0,        # altura columna líquida útil
+    # Componentes internos
+    "spraybar_d": 50.0,
+    "spraybar_h": 1700.0,
+    "spray_nozzle_count": 24,
+    "spray_nozzle_d": 12.0,
+    "heatx_w": 120.0,
+    "heatx_t": 50.0,
+    "heatx_h": 1400.0,
+    "baffle_count": 3,
+    "baffle_t": 6.0,
+    "sump_d": 180.0,
+    "sump_h": 120.0,
+    # Boquillas y válvulas
+    "upper_port_d": 80.0,
+    "upper_port_len": 200.0,
+    "exhaust_offset": 160.0,
+    "vent_offset": -160.0,
+    "lower_nozzle_d": 120.0,
+    "lower_nozzle_len": 180.0,
+    # Bomba y J-T
+    "pump_d": 240.0,
+    "pump_h": 220.0,
+    "jt_d": 120.0,
+    "jt_h": 160.0,
+    # Tuberías externas
+    "pipe_d": 80.0,
+    "pipe_len": 500.0,
+    # Patas/soporte suelo
+    "leg_count": 3,
+    "leg_w": 80.0,
+    "leg_t": 20.0,
+    "leg_h": 500.0,
+    "skid_w": 220.0,
+    "skid_t": 30.0,
+    "skid_len": 800.0,
+    # Módulo motor (espacio)
+    "engine_flange_d": 700.0,
+    "engine_flange_t": 40.0,
+    "throat_d": 260.0,
+    "exit_d": 900.0,
+    "nozzle_len": 600.0,
+    # Materiales (densidades)
+    "rho_wall": 8000.0,        # acero Inox ~8000 kg/m^3
+    "rho_liner": 1200.0,       # polímero compatible ~1200
+    "rho_insul": 100.0,        # MLI/aerogel ~100
+}
+
+# ---------------------------
+# Utilidades
+def add_obj(shape, name, color=(0.8,0.8,0.85)):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    if hasattr(o, "ViewObject"):
+        o.ViewObject.ShapeColor = color
+    return o
+
+def cyl(d, h):
+    return Part.makeCylinder(d/2.0, h)
+
+def cone(d1, d2, h):
+    return Part.makeCone(d1/2.0, d2/2.0, h)
+
+def box(l, w, t):
+    return Part.makeBox(l, w, t)
+
+def hollow_cylinder(od, t, h):
+    outer = cyl(od, h)
+    inner = cyl(od - 2.0*t, h - t)
+    inner.translate(App.Vector(0,0,t/2.0))
+    return outer.cut(inner)
+
+def ring(d_outer, thickness, h):
+    return cyl(d_outer, h).cut(cyl(d_outer - 2.0*thickness, h))
+
+def mass_from_volume(vol_mm3, rho):
+    # mm^3 -> m^3
+    return (vol_mm3 * 1e-9) * rho
+
+# ---------------------------
+# Ejes y referencias
+H = P["tank_h"]
+D = P["tank_d"]
+wall_t = P["wall_t"]
+liner_t = P["liner_t"]
+insul_t = P["insul_t"]
+inner_d = D - 2.0*(wall_t + liner_t + insul_t)
+
+z0 = 0.0
+z_dome = H - P["dome_h"]
+z_cone = 0.0
+
+parts = []
+mass_report = []
+
+# ---------------------------
+# Capas concéntricas: aislamiento, pared, liner
+insul = hollow_cylinder(D, insul_t, H)
+insul_obj = add_obj(insul, "Insulation", (0.75, 0.85, 0.95))
+parts.append(insul)
+mass_report.append(("Insulation", insul.Volume, P["rho_insul"]))
+
+wall = hollow_cylinder(D - 2.0*insul_t, wall_t, H)
+wall_obj = add_obj(wall, "Wall", (0.70, 0.70, 0.75))
+parts.append(wall)
+mass_report.append(("Wall", wall.Volume, P["rho_wall"]))
+
+liner = hollow_cylinder(D - 2.0*(insul_t + wall_t), liner_t, H)
+liner_obj = add_obj(liner, "Liner", (0.80, 0.90, 0.95))
+parts.append(liner)
+mass_report.append(("Liner", liner.Volume, P["rho_liner"]))
+
+# ---------------------------
+# Cúpula superior interna (vapor dome) y región vapor/líquido (volúmenes de referencia)
+dome_inner = Part.makeSphere(inner_d/2.0)
+# Recortamos esfera para hacer cúpula (solo una calota)
+cut_box = box(inner_d, inner_d, inner_d)
+cut_box.translate(App.Vector(-inner_d/2.0, -inner_d/2.0, z_dome - inner_d/2.0))
+dome_inner.Placement = App.Placement(App.Vector(0,0,z_dome), App.Rotation())
+dome = dome_inner.common(cut_box)
+dome_obj = add_obj(dome, "VaporDome", (0.9,0.9,1.0))
+parts.append(dome)
+
+# Plano de separación vapor/líquido y volúmenes de guía
+vapor_h = P["vapor_h"]
+liquid_h = P["liquid_h"]
+
+vapor_guide = cyl(inner_d, vapor_h)
+vapor_guide.translate(App.Vector(0,0,z_dome - vapor_h))
+add_obj(vapor_guide, "VaporRegionGuide", (0.6,0.8,1.0))
+
+liquid_guide = cyl(inner_d, liquid_h)
+liquid_guide.translate(App.Vector(0,0,wall_t + 20.0))
+add_obj(liquid_guide, "LiquidRegionGuide", (0.6,0.9,0.9))
+
+# ---------------------------
+# Spray bar central con boquillas
+spraybar = cyl(P["spraybar_d"], P["spraybar_h"])
+spraybar.translate(App.Vector(0,0,wall_t + 40.0))
+add_obj(spraybar, "SprayBar", (0.85,0.85,0.9))
+
+nozzles = []
+import math
+for i in range(P["spray_nozzle_count"]):
+    z = (P["spraybar_h"] - 80.0) * (i/(P["spray_nozzle_count"]-1.0)) + wall_t + 40.0
+    ang = (i * 2.0 * math.pi / P["spray_nozzle_count"])
+    r = (inner_d/2.0) - 40.0
+    x = r * math.cos(ang)
+    y = r * math.sin(ang)
+    noz = cyl(P["spray_nozzle_d"], 40.0)
+    noz.Placement = App.Placement(App.Vector(x, y, z), App.Rotation(App.Vector(0,0,1), math.degrees(ang)))
+    add_obj(noz, f"Nozzle_{i:02d}", (0.8,0.9,0.95))
+    nozzles.append(noz)
+
+# ---------------------------
+# Intercambiador de calor lateral (placa aletas)
+hx = box(P["heatx_w"], P["heatx_t"], P["heatx_h"])
+hx.translate(App.Vector(inner_d/2.0 - P["heatx_w"] - 30.0, -P["heatx_t"]/2.0, H/2.0 - P["heatx_h"]/2.0))
+add_obj(hx, "HeatExchanger", (0.7,0.85,0.9))
+
+# ---------------------------
+# Bafles internos anti-slosh
+baffles = []
+for i in range(P["baffle_count"]):
+    z = H/3.5 + i * (liquid_h - 200.0) / max(1,(P["baffle_count"]-1))
+    disk = ring(inner_d, P["baffle_t"], 6.0)
+    disk.translate(App.Vector(0,0,z))
+    add_obj(disk, f"Baffle_{i+1}", (0.75,0.8,0.85))
+    baffles.append(disk)
+
+# ---------------------------
+# Sumidero inferior (sump) y boquilla inferior
+sump = cyl(P["sump_d"], P["sump_h"])
+sump.translate(App.Vector(0,0,wall_t))
+add_obj(sump, "Sump", (0.8,0.85,0.9))
+
+lower_nozzle = cyl(P["lower_nozzle_d"], P["lower_nozzle_len"])
+lower_nozzle.translate(App.Vector(0,0,wall_t - P["lower_nozzle_len"]))
+add_obj(lower_nozzle, "LowerNozzle", (0.7,0.75,0.8))
+
+# ---------------------------
+# Válvulas superiores: exhaust y venting
+upper_port_exhaust = cyl(P["upper_port_d"], P["upper_port_len"])
+upper_port_exhaust.rotate(App.Vector(0,0,H - P["dome_h"]/2.0), App.Vector(0,1,0), 90)
+upper_port_exhaust.translate(App.Vector(P["exhaust_offset"], 0, H - P["dome_h"]/2.0))
+add_obj(upper_port_exhaust, "ExhaustValvePort", (0.75,0.75,0.8))
+
+upper_port_vent = cyl(P["upper_port_d"], P["upper_port_len"])
+upper_port_vent.rotate(App.Vector(0,0,H - P["dome_h"]/2.0), App.Vector(0,1,0), 90)
+upper_port_vent.translate(App.Vector(P["vent_offset"], 0, H - P["dome_h"]/2.0))
+add_obj(upper_port_vent, "VentingValvePort", (0.75,0.75,0.8))
+
+# ---------------------------
+# Bomba criogénica externa y válvula J-T
+pump = cyl(P["pump_d"], P["pump_h"])
+pump.translate(App.Vector(0,0,-P["pump_h"]))
+add_obj(pump, "CryogenicPump", (0.65,0.75,0.85))
+
+jt = cyl(P["jt_d"], P["jt_h"])
+jt.rotate(App.Vector(P["jt_d"],0,0), App.Vector(0,1,0), 90)
+jt.translate(App.Vector(D/2.0 + 120.0, 0, 160.0))
+add_obj(jt, "JT_Valve", (0.7,0.8,0.9))
+
+# ---------------------------
+# Tuberías externas (bombas/valvulería)
+pipe1 = cyl(P["pipe_d"], P["pipe_len"])
+pipe1.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+pipe1.translate(App.Vector(D/2.0 + 80.0, 0, wall_t + 80.0))
+add_obj(pipe1, "ExternalPipe_1", (0.75,0.8,0.85))
+
+pipe2 = cyl(P["pipe_d"], P["pipe_len"])
+pipe2.rotate(App.Vector(0,0,0), App.Vector(0,1,0), 90)
+pipe2.translate(App.Vector(D/2.0 + 80.0, 0, H/2.0))
+add_obj(pipe2, "ExternalPipe_2", (0.75,0.8,0.85))
+
+# ---------------------------
+# Base cónica y módulo motor (espacial)
+base_cone = cone(D - 2.0*insul_t, D*0.6, P["cone_h"])
+base_cone.translate(App.Vector(0,0,-P["cone_h"]))
+add_obj(base_cone, "BaseCone", (0.7,0.7,0.75))
+
+engine_flange = ring(P["engine_flange_d"], P["engine_flange_t"], P["engine_flange_t"])
+engine_flange.translate(App.Vector(0,0,-P["cone_h"] - P["engine_flange_t"]))
+add_obj(engine_flange, "EngineFlange", (0.75,0.75,0.8))
+
+engine_nozzle = cone(P["exit_d"], P["throat_d"], P["nozzle_len"])
+engine_nozzle.translate(App.Vector(0,0,-P["cone_h"] - 2.0*P["engine_flange_t"] - P["nozzle_len"]))
+add_obj(engine_nozzle, "EngineNozzle", (0.6,0.65,0.75))
+
+# ---------------------------
+# Patas de soporte (tierra) y patines
+legs = []
+for i in range(P["leg_count"]):
+    ang = i * 360.0 / P["leg_count"]
+    rad = (D/2.0) - 40.0
+    # placa vertical
+    leg_plate = box(P["leg_t"], P["leg_w"], P["leg_h"])
+    # rotar y ubicar alrededor del perímetro
+    leg_plate.Placement = App.Placement(App.Vector(rad, 0, -P["leg_h"]), App.Rotation(App.Vector(0,0,1), ang))
+    add_obj(leg_plate, f"Leg_{i+1}", (0.6,0.7,0.8))
+    legs.append(leg_plate)
+    # patín
+    skid = box(P["skid_len"], P["skid_w"], P["skid_t"])
+    skid.Placement = App.Placement(App.Vector(rad + 40.0, -P["skid_w"]/2.0, -P["leg_h"] - P["skid_t"]),
+                                   App.Rotation(App.Vector(0,0,1), ang))
+    add_obj(skid, f"Skid_{i+1}", (0.55,0.65,0.75))
+
+# ---------------------------
+# Reporte de masa básico
+total_mass = 0.0
+for name, vol, rho in mass_report:
+    m = mass_from_volume(vol, rho)
+    total_mass += m
+
+rep = doc.addObject("App::FeaturePython", "MassReport")
+rep.Label = f"Estimated structural mass: {total_mass:.1f} kg"
+
+# Vista
+Gui.ActiveDocument.ActiveView.fitAll()
+App.ActiveDocument.recompute()

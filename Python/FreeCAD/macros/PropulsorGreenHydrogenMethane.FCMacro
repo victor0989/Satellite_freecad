@@ -1,0 +1,284 @@
+# -*- coding:utf-8 -*-
+import FreeCAD as App, FreeCADGui as Gui, Part, math
+
+doc_name="CassiniUltra_GreenPropulsor_CubeSat"
+doc=App.ActiveDocument if App.ActiveDocument and App.ActiveDocument.Label==doc_name else App.newDocument(doc_name)
+doc=App.ActiveDocument
+
+# --------------------------------
+# Parámetros CassiniUltra + CubeSat
+# --------------------------------
+P={
+    # Envelope CubeSat
+    "Units":2,              # 2U/4U
+    "U":100.0,              # mm lado
+    "wall_t":3.0,
+    "rail_w":8.0,
+    "rail_t":3.0,
+    "bulkhead_t":2.0,
+    "clear_inner":2.0,
+
+    # Base plate & holes
+    "base_t":3.0,
+    "hole_d":3.5,
+    "hole_edge":8.0,
+
+    # Lattice X (recorte visual)
+    "face_X":True,
+    "face_frame_t":2.0,
+
+    # Shield (multicapa, separado del frame)
+    "shield_enabled":True,
+    "shield_layers":[(1.0,(0.9,0.9,0.6),"PE_Layer"),
+                     (0.8,(0.3,0.3,0.3),"CFRP_Layer"),
+                     (0.6,(0.5,0.5,0.7),"W_Layer")],
+    "whipple_t":1.0,
+    "whipple_gap":1.2,
+
+    # Tanques (volumen bruto objetivo)
+    "tank_main_V_cm3":420.0,"tank_main_H":110.0,
+    "tank_ext_V_cm3":474.16,"tank_ext_H":120.0,
+    # PMD + ullage (libre para iteración)
+    "pmd_frac_main":0.10,"ullage_frac_main":0.05,
+    "pmd_frac_ext":0.12,"ullage_frac_ext":0.08,
+    "liner_t":1.5,"cfrp_t":1.2,
+
+    # Propulsión (thruster metálico low-cost, HNP225 like)
+    "thr_R_throat":5.0,"thr_R_exit":16.0,"thr_H":26.0,
+    "thr_collar_t":2.0,"thr_collar_R":18.0,
+    "thr_mount_side":"X+",    # X+ lateral o Z- base
+    "thr_port_margin":0.8,
+
+    # Bomba/válvulas/manifold/tubing/ECU
+    "pump_d":10.0,"pump_L":24.0,
+    "valve3_box":(14.0,12.0,12.0),
+    "fcv_box":(12.0,10.0,10.0),
+    "manifold_box":(22.0,12.0,10.0),
+    "tube_d":3.0,
+    "ecu_box":(44.0,32.0,14.0),
+    "tray_t":2.0,
+
+    # Físico y misión (HNP225: menor ΔV pero mayor payload posible)
+    "rho_ti":4430,"rho_cfrp":1600,"rho_prop":1200, # kg/m3 aprox
+    "Isp":240.0,"g0":9.80665,
+    "m_inert_est":1.5,  # kg (inert, reflejando thr metálico y estructura)
+}
+
+MATS={
+    "Frame":{"name":"Al 7075-T6","rho":2810},
+    "Rail":{"name":"Ti-6Al-4V","rho":4430},
+    "TankLiner":{"name":"Ti-6Al-4V","rho":4430},
+    "TankCFRP":{"name":"CFRP","rho":1600},
+    "Propellant":{"name":"HNP225-like","rho":1200},
+    "Thruster":{"name":"Metal 3D printed","rho":7800},
+    "Avionics":{"name":"Al Frame + PCB","rho":2200},
+    "Tubing":{"name":"SS316L","rho":8000}
+}
+
+# --------------------------------
+# Utilidades estilo CassiniUltra
+# --------------------------------
+X_AXIS=App.Vector(1,0,0);Y_AXIS=App.Vector(0,1,0);Z_AXIS=App.Vector(0,0,1)
+rot_to_x=lambda:App.Rotation(Y_AXIS,90)
+def add_obj(s,n): o=doc.addObject("Part::Feature",n); o.Shape=s; return o
+def color(o,rgb): 
+    if hasattr(o,"ViewObject"): o.ViewObject.ShapeColor=rgb
+    return o
+
+def cyl_x(d,L,cx=0,cy=0,cz=0): s=Part.makeCylinder(d/2.0,L); s.Placement=App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x()); return s
+def cone_x(d1,d2,L,cx=0,cy=0,cz=0): s=Part.makeCone(d1/2.0,d2/2.0,L); s.Placement=App.Placement(App.Vector(cx-L/2.0,cy,cz),rot_to_x()); return s
+def box_at(l,w,t,x,y,z): b=Part.makeBox(l,w,t); b.translate(App.Vector(x,y,z)); return b
+def box_x(l,w,h,cx=0,cy=0,cz=0): b=Part.makeBox(l,w,h); b.Placement=App.Placement(App.Vector(cx-l/2.0,cy-w/2.0,cz-h/2.0),App.Rotation()); return b
+
+# --------------------------------
+# Frame único (2U/4U) sin duplicaciones
+# --------------------------------
+def build_frame():
+    U=P["U"]; L=U*P["Units"]; t=P["wall_t"]; rw=P["rail_w"]; rt=P["rail_t"]
+    shell_outer=box_x(U,U,L,cx=0,cy=0,cz=L/2.0)
+    shell_inner=box_x(U-2*t,U-2*t,L-2*t,cx=0,cy=0,cz=L/2.0)
+    frame=shell_outer.cut(shell_inner)
+    # Rails L
+    rails=[]
+    for x in [-(U/2.0)+t,(U/2.0)-t-rw]:
+        for y in [-(U/2.0)+t,(U/2.0)-t-rw]:
+            r1=box_at(rw,rt,L,x,y,0)
+            r2=box_at(rt,rw,L,x+rw-rt,y,0)
+            rails+=[r1,r2]
+    for r in rails: frame=frame.fuse(r)
+    # Base plate
+    plate=box_at(U-2*t,U-2*t,P["base_t"],-(U/2.0)+t,-(U/2.0)+t,0)
+    # Holes
+    hd,he=P["hole_d"],P["hole_edge"]
+    for (x,y) in [(-(U/2.0)+t+he,-(U/2.0)+t+he),
+                  ((U/2.0)-t-he,-(U/2.0)+t+he),
+                  (-(U/2.0)+t+he,(U/2.0)-t-he),
+                  ((U/2.0)-t-he,(U/2.0)-t-he)]:
+        plate=plate.cut(Part.makeCylinder(hd/2.0,P["base_t"]+1.0,App.Vector(x,y,-0.5),App.Vector(0,0,1)))
+    frame=frame.fuse(plate)
+    # Bulkheads
+    for k in range(1,P["Units"]):
+        z=k*U
+        bh=box_at(U-2*t,U-2*t,P["bulkhead_t"],-(U/2.0)+t,-(U/2.0)+t,z-P["bulkhead_t"]/2.0)
+        frame=frame.fuse(bh)
+    return add_obj(frame,"Frame")
+
+# --------------------------------
+# Puerto para thruster (recorte, evita intersección)
+# --------------------------------
+def cut_thr_port(frame_shape):
+    U=P["U"]; L=U*P["Units"]; t=P["wall_t"]; R=P["thr_collar_R"]; m=P["thr_port_margin"]
+    if P["thr_mount_side"]=="X+":
+        port=cyl_x(2*(R+m),t+0.6,cx=(U/2.0)-t-0.3,cy=0,cz=L/2.0)
+        return frame_shape.cut(port),("side",2*(R+m))
+    else:
+        port=Part.makeCylinder(R+m,P["base_t"]+0.6,App.Vector(0,0,-0.3),App.Vector(0,0,1))
+        port.Placement.Base=App.Vector(0,0,-0.3)  # centro ya en origen
+        # recorte circular centrado
+        port=Part.makeCylinder(R+m,P["base_t"]+0.6,App.Vector(0,0,-0.3),App.Vector(0,0,1))
+        return frame_shape.cut(port),("base",2*(R+m))
+
+# --------------------------------
+# Shield multicapa (separado del frame)
+# --------------------------------
+def build_box_shield():
+    if not P["shield_enabled"]: return []
+    U=P["U"]; L=U*P["Units"]; t=P["wall_t"]
+    innerL=U-2*t-P["clear_inner"]; innerW=U-2*t-P["clear_inner"]; innerH=L-2*t-P["clear_inner"]
+    shapes=[]
+    curL,curW,curH=innerL,innerW,innerH
+    for thickness,col,name in P["shield_layers"]:
+        outer=box_x(curL+2*thickness,curW+2*thickness,curH+2*thickness,cx=0,cy=0,cz=L/2.0)
+        inner=box_x(curL,curW,curH,cx=0,cy=0,cz=L/2.0)
+        layer=outer.cut(inner)
+        shapes.append(color(add_obj(layer,f"Shield_{name}"),col))
+        curL,curW,curH=curL+2*thickness,curW+2*thickness,curH+2*thickness
+    wh_outer=box_x(curL+2*P["whipple_gap"],curW+2*P["whipple_gap"],curH+2*P["whipple_gap"],cx=0,cy=0,cz=L/2.0)
+    wh_inner=box_x(curL+2*P["whipple_gap"]-2*P["whipple_t"],curW+2*P["whipple_gap"]-2*P["whipple_t"],curH+2*P["whipple_gap"]-2*P["whipple_t"],cx=0,cy=0,cz=L/2.0)
+    wh=wh_outer.cut(wh_inner)
+    shapes.append(color(add_obj(wh,"Whipple_Box"),(0.8,0.8,0.8)))
+    return shapes
+
+# --------------------------------
+# Tanques dimensionados por volumen objetivo
+# --------------------------------
+def solve_R_for_V(V_cm3,H_mm): return 10.0*math.sqrt(V_cm3/(math.pi*(H_mm/10.0)))
+
+def build_tank(cx,cy,cz,V_cm3,H_mm,name,pmd_frac,ullage_frac):
+    R=solve_R_for_V(V_cm3,H_mm)
+    cfrp=Part.makeCylinder(R,H_mm,App.Vector(cx,cy,cz),App.Vector(0,0,1))
+    liner=Part.makeCylinder(R-P["liner_t"],H_mm-2*P["liner_t"],App.Vector(cx,cy,cz+P["liner_t"]),App.Vector(0,0,1))
+    vane=Part.makeCylinder(R*0.92,H_mm*pmd_frac,App.Vector(cx,cy,cz),App.Vector(0,0,1))
+    sponge=Part.makeCylinder(R*0.85,H_mm*pmd_frac*0.4,App.Vector(cx,cy,cz),App.Vector(0,0,1))
+    color(add_obj(cfrp,f"{name}_CFRP"),(0.2,0.2,0.22))
+    color(add_obj(liner,f"{name}_Liner"),(0.6,0.6,0.65))
+    color(add_obj(vane.fuse(sponge),f"{name}_PMD"),(0.85,0.80,0.70))
+    usable=V_cm3*(1.0-(pmd_frac+ullage_frac))
+    return {"R_mm":R,"H_mm":H_mm,"usable_cm3":usable}
+
+# --------------------------------
+# Propulsión: bomba, válvulas, manifold, thruster metálico
+# --------------------------------
+def build_pump(cx,cy,cz):
+    pump=cyl_x(P["pump_d"],P["pump_L"],cx=cx,cy=cy,cz=cz)
+    return color(add_obj(pump,"Micro_ePump"),(0.45,0.45,0.55))
+
+def build_valve3(cx,cy,cz):
+    l,w,h=P["valve3_box"]; v=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(v,"Valve_3Way"),(0.55,0.55,0.65))
+
+def build_fcv(cx,cy,cz):
+    l,w,h=P["fcv_box"]; v=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(v,"Thruster_FCV"),(0.55,0.55,0.65))
+
+def build_manifold(cx,cy,cz):
+    l,w,h=P["manifold_box"]; m=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(m,"Manifold"),(0.55,0.55,0.65))
+
+def build_thruster_on_port(info):
+    mount,port_d=info; U=P["U"]; L=U*P["Units"]
+    if mount=="side":
+        # orientado +X
+        cone=cone_x(2*P["thr_R_throat"],2*P["thr_R_exit"],P["thr_H"],cx=(U/2.0)-P["wall_t"]-P["thr_collar_R"]-P["thr_port_margin"],cy=0,cz=L/2.0)
+        collar=cyl_x(2*P["thr_collar_R"],P["thr_collar_t"],cx=(U/2.0)-P["wall_t"]-0.3,cy=0,cz=L/2.0)
+        thr=cone.fuse(collar)
+        return color(add_obj(thr,"Thruster_Side"),(0.7,0.7,0.75))
+    else:
+        # base Z-
+        cone=Part.makeCone(P["thr_R_throat"],P["thr_R_exit"],P["thr_H"])
+        cone.translate(App.Vector(-P["thr_R_exit"],0,-P["thr_H"]))
+        collar=Part.makeCylinder(P["thr_collar_R"],P["thr_collar_t"],App.Vector(0,0,-P["thr_collar_t"]/2.0),App.Vector(0,0,1))
+        thr=cone.fuse(collar)
+        return color(add_obj(thr,"Thruster_Base"),(0.7,0.7,0.75))
+
+# --------------------------------
+# ECU & tray
+# --------------------------------
+def build_ecu(cx,cy,cz):
+    l,w,h=P["ecu_box"]; ecu=box_x(l,w,h,cx=cx,cy=cy,cz=cz)
+    return color(add_obj(ecu,"ECU"),(0.35,0.35,0.55))
+def build_tray(cx,cy,cz):
+    tray=box_x(P["U"]-2*P["wall_t"],P["U"]-2*P["wall_t"],P["tray_t"],cx=cx,cy=cy,cz=cz)
+    return color(add_obj(tray,"AvionicsTray"),(0.5,0.5,0.55))
+
+# --------------------------------
+# Ensamblaje principal
+# --------------------------------
+def build():
+    U=P["U"]; L=U*P["Units"]; t=P["wall_t"]
+
+    frame=build_frame()
+    # Recorta puerto thruster
+    cut_shape,info=cut_thr_port(frame.Shape)
+    frame.Shape=cut_shape
+
+    # Shield independiente
+    _shield=build_box_shield()
+
+    # Tanques (centro por cada U)
+    z_main=-(L/2.0)+t+P["clear_inner"]+P["tank_main_H"]/2.0
+    z_ext = z_main + U if P["Units"]>=2 else z_main + P["tank_main_H"] + 10.0
+
+    t_main=build_tank(0,0,z_main,P["tank_main_V_cm3"],P["tank_main_H"],"TankMain",P["pmd_frac_main"],P["ullage_frac_main"])
+    t_ext =build_tank(0,0,z_ext ,P["tank_ext_V_cm3"], P["tank_ext_H"], "TankExt" ,P["pmd_frac_ext"] ,P["ullage_frac_ext" ])
+
+    # Top: bomba/valvulas/manifold
+    top_z=(L/2.0)-t-P["clear_inner"]
+    pump=build_pump(0,0,top_z)
+    v3  =build_valve3(12.0,0,top_z-6.0)
+    fcv =build_fcv(0,12.0,top_z-12.0)
+    mani=build_manifold(-14.0,0,top_z-18.0)
+
+    # Thruster (no intersección)
+    thr=build_thruster_on_port(info)
+
+    # ECU & tray
+    tray=build_tray(0,0,0)
+    ecu =build_ecu(-20.0,0,top_z-24.0)
+
+    # Tuberías limpias
+    place_cylinder_between((0,0,top_z),( -14.0,0,top_z-18.0 ),P["tube_d"],"Tube_Pump_Manifold")
+    place_cylinder_between((12.0,0,top_z-6.0),( -14.0,0,top_z-18.0 ),P["tube_d"],"Tube_V3_Manifold")
+    if info[0]=="side":
+        place_cylinder_between((0,12.0,top_z-12.0),( (U/2.0)-t-P["thr_collar_R"]-P["thr_port_margin"], 0, 0 ),P["tube_d"],"Tube_FCV_Thruster")
+    else:
+        place_cylinder_between((0,12.0,top_z-12.0),( 0,0,-P["thr_H"]/2.0 ),P["tube_d"],"Tube_FCV_Thruster")
+    # Feeds tanque → manifold
+    place_cylinder_between((0,0,z_main + t_main["H_mm"]/2.0),( -14.0,0,top_z-18.0 ),P["tube_d"],"Tube_TankMain_Manifold")
+    place_cylinder_between((0,0,z_ext  + t_ext ["H_mm"]/2.0),( -14.0,0,top_z-18.0 ),P["tube_d"],"Tube_TankExt_Manifold")
+
+    # Volúmenes y ΔV
+    usable_main=t_main["usable_cm3"]; usable_ext=t_ext["usable_cm3"]
+    m_prop=(usable_main+usable_ext)/1e6 * P["rho_prop"]
+    mi=P["m_inert_est"]+m_prop; mf=P["m_inert_est"]
+    dV= P["Isp"]*P["g0"]*math.log(mi/mf) if mi>mf else 0.0
+
+    print(f"[TankMain] R={t_main['R_mm']:.2f} mm, H={t_main['H_mm']:.2f} mm, usable={usable_main:.2f} cm3")
+    print(f"[TankExt ] R={t_ext ['R_mm']:.2f} mm, H={t_ext ['H_mm']:.2f} mm, usable={usable_ext :.2f} cm3")
+    print(f"Propellant mass total = {m_prop:.3f} kg")
+    print(f"ΔV ideal = {dV:.2f} m/s (Isp={P['Isp']} s)")
+
+    App.ActiveDocument.recompute()
+    Gui.SendMsgToActiveView("ViewFit")
+
+build()
