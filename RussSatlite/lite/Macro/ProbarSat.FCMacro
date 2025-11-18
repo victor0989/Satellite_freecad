@@ -1,0 +1,659 @@
+# -*- coding: utf-8 -*-
+# Estación "Parker XL" — macro ejecutable de supervivencia extrema (completo)
+
+import FreeCAD as App
+import Part
+import math
+
+try:
+    import FreeCADGui as Gui
+    HAS_GUI = True
+except Exception:
+    HAS_GUI = False
+
+DOC_NAME = "Parker_XL_Survival"
+
+# ----------------------------------------------------
+# Utilidades
+# ----------------------------------------------------
+def mm(x_m):
+    return float(x_m) * 1000.0
+
+def ensure_doc(name=DOC_NAME):
+    if App.ActiveDocument and App.ActiveDocument.Name == name:
+        doc = App.ActiveDocument
+        for o in list(doc.Objects):
+            try:
+                doc.removeObject(o.Name)
+            except Exception:
+                pass
+        return doc
+    for d in list(App.listDocuments().values()):
+        if d.Name == name:
+            App.closeDocument(d.Name)
+    return App.newDocument(name)
+
+def add_obj(shape, name, color=None, transparency=0):
+    obj = App.ActiveDocument.addObject("Part::Feature", name)
+    obj.Shape = shape
+    if HAS_GUI:
+        try:
+            if color is not None:
+                obj.ViewObject.ShapeColor = color
+            obj.ViewObject.Transparency = int(transparency)
+        except Exception:
+            pass
+    return obj
+
+def fuse_all(shapes):
+    shapes = [s for s in shapes if s is not None]
+    if not shapes:
+        return None
+    s = shapes[0]
+    for t in shapes[1:]:
+        try:
+            s = s.fuse(t)
+        except Exception:
+            pass
+    return s
+
+def cut_safe(a, b):
+    if a is None:
+        return None
+    if b is None:
+        return a
+    try:
+        return a.cut(b)
+    except Exception:
+        return a
+
+def rotate(shape, axis, angle_deg, center=App.Vector(0,0,0)):
+    sh = shape.copy()
+    sh.rotate(center, axis, angle_deg)
+    return sh
+
+def translate(shape, v):
+    sh = shape.copy()
+    sh.translate(v)
+    return sh
+
+def box_centered(cx, cy, cz, lx, ly, lz):
+    return Part.makeBox(lx, ly, lz, App.Vector(cx - lx/2.0, cy - ly/2.0, cz - lz/2.0))
+
+def clamp(a, lo, hi):
+    return max(lo, min(hi, a))
+
+# ----------------------------------------------------
+# Tus módulos existentes (sin cambios)
+# ----------------------------------------------------
+def make_reactor_core(P, bus_shape):
+    bb = bus_shape.BoundBox
+    r = mm(2.8); L = mm(7.0)
+    x0 = bb.XMin - L - mm(4.0)
+    core = Part.makeCylinder(r, L, App.Vector(x0, 0, 0), App.Vector(1,0,0))
+    shield = Part.makeCylinder(mm(6.5), mm(0.6), App.Vector(x0 + L, -mm(6.5), -mm(6.5)), App.Vector(1,0,0))
+    plates = []
+    n = 8; radL = mm(12.0); radW = mm(3.2); radT = mm(0.12)
+    for i in range(n):
+        ang = -70 + 140 * (i / float(n-1))
+        plate = Part.makeBox(radT, radL, radW, App.Vector(x0 + L/2.0, -radL/2.0, r + mm(0.4)))
+        plate = rotate(plate, App.Vector(0,1,0), ang, App.Vector(x0 + L/2.0, 0, 0))
+        plates.append(plate)
+    return fuse_all([core, shield, fuse_all(plates)])
+
+def make_solar_concentrators(P, bus_shape):
+    bb = bus_shape.BoundBox
+    A = P["solar_area_m2"]; span = mm(0.001*A)
+    c1 = Part.makeCone(mm(8.0), mm(1.2), mm(2.4), App.Vector(bb.XMax + mm(4.0),  bb.YMax + mm(8.0), 0), App.Vector(0, -1, 0))
+    c2 = Part.makeCone(mm(8.0), mm(1.2), mm(2.4), App.Vector(bb.XMax + mm(4.0),  bb.YMin - mm(8.0), 0), App.Vector(0,  1, 0))
+    b1 = Part.makeBox(mm(0.3), mm(8.0), mm(8.0), App.Vector(bb.XMax + mm(3.7),  bb.YMax + mm(4.0), -mm(4.0)))
+    b2 = Part.makeBox(mm(0.3), mm(8.0), mm(8.0), App.Vector(bb.XMax + mm(3.7),  bb.YMin - mm(12.0), -mm(4.0)))
+    return fuse_all([c1, c2, b1, b2])
+
+def make_hall_thruster_cluster(P, bus_shape):
+    bb = bus_shape.BoundBox
+    k = max(1, int(P["hall_clusters"]))
+    d = mm(P.get("hall_diam_m", 1.6))
+    L = mm(1.2)
+    base_x = bb.XMin - mm(1.0)
+    thr = []
+    for i in range(k):
+        y = -bb.YLength/2.0 + (i+0.5)*(bb.YLength/k)
+        ring = Part.makeTorus(d/2.0, mm(0.15), App.Vector(base_x, y, 0), App.Vector(1,0,0))
+        body = Part.makeCylinder(d/2.5, L, App.Vector(base_x - L, y, 0), App.Vector(1,0,0))
+        thr.append(fuse_all([ring, body]))
+    return fuse_all(thr)
+
+def make_vasimr_thruster(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x0 = bb.XMin - mm(10.0)
+    tube = Part.makeCylinder(mm(1.2), mm(8.0), App.Vector(x0, 0, 0), App.Vector(1,0,0))
+    coil1 = Part.makeTorus(mm(1.6), mm(0.25), App.Vector(x0 + mm(1.5), 0, 0), App.Vector(1,0,0))
+    coil2 = Part.makeTorus(mm(1.6), mm(0.25), App.Vector(x0 + mm(3.5), 0, 0), App.Vector(1,0,0))
+    nozzle = Part.makeCone(mm(1.4), mm(0.4), mm(2.0), App.Vector(x0 - mm(2.0), 0, 0), App.Vector(1,0,0))
+    return fuse_all([tube, coil1, coil2, nozzle])
+
+def make_magscoop_coil(P, bus_shape):
+    bb = bus_shape.BoundBox
+    R = mm(P["magscoop_radius_m"]); r = mm(0.8)
+    coil = Part.makeTorus(R, r, App.Vector((bb.XMin+bb.XMax)/2.0, 0, 0), App.Vector(1,0,0))
+    struts = []
+    for z in (-R, R):
+        s = Part.makeBox(mm(0.6), mm(0.6), mm(1.2), App.Vector((bb.XMin+bb.XMax)/2.0, -mm(0.3), z - mm(0.6)))
+        struts.append(s)
+    return fuse_all([coil, fuse_all(struts)])
+
+def make_electrostatic_scoops(P):
+    n = max(4, int(P["electrostatic_cones"]))
+    cones = []
+    offx = mm(1.0)
+    for i in range(n):
+        ang = 360.0*i/float(n)
+        y = mm(10.0) * math.cos(math.radians(ang))
+        z = mm(10.0) * math.sin(math.radians(ang))
+        c = Part.makeCone(mm(3.0), mm(0.4), mm(6.0), App.Vector(offx, y, z), App.Vector(1,0,0))
+        cones.append(c)
+    return fuse_all(cones)
+
+def make_tether_reel(P, bus_shape):
+    bb = bus_shape.BoundBox
+    drum = Part.makeCylinder(mm(1.5), mm(2.2), App.Vector(bb.XMax + mm(3.0), 0, -mm(3.0)), App.Vector(1,0,0))
+    tape = Part.makeBox(mm(0.05), mm(0.6), mm(120.0), App.Vector(bb.XMax + mm(4.0), -mm(0.3), -mm(3.0)))
+    return fuse_all([drum, tape])
+
+def make_isru_drill_rigs(P, bus_shape):
+    bb = bus_shape.BoundBox
+    rigs = []
+    n = max(1, int(P["isru_drills"]))
+    for i in range(n):
+        y = -bb.YLength/2.0 + (i+0.5)*(bb.YLength/n)
+        mast = Part.makeBox(mm(0.4), mm(0.4), mm(6.0), App.Vector(bb.XMax + mm(2.0), y - mm(0.2), -mm(3.0)))
+        auger = Part.makeCone(mm(0.40), mm(0.10), mm(3.0), App.Vector(bb.XMax + mm(2.0), y, -mm(3.0) - mm(3.0)), App.Vector(0,0,-1))
+        rigs.append(fuse_all([mast, auger]))
+    return fuse_all(rigs)
+
+def make_electrolyzer_stack(P, bus_shape):
+    bb = bus_shape.BoundBox
+    stack = []
+    base = Part.makeBox(mm(2.6), mm(2.0), mm(1.2), App.Vector(bb.XMax + mm(1.0), -mm(1.0), -mm(0.6)))
+    for k in range(3):
+        cell = Part.makeCylinder(mm(0.6), mm(1.0), App.Vector(bb.XMax + mm(1.2 + 0.8*k), 0, 0), App.Vector(0,1,0))
+        stack.append(cell)
+    stack.append(base)
+    return fuse_all(stack)
+
+def make_sabatier_module(P, bus_shape):
+    bb = bus_shape.BoundBox
+    box = Part.makeBox(mm(3.0), mm(1.6), mm(1.2), App.Vector(bb.XMax + mm(1.0), mm(1.2), -mm(0.6)))
+    tube = Part.makeCylinder(mm(0.25), mm(2.0), App.Vector(bb.XMax + mm(4.0), mm(1.2), 0), App.Vector(0,1,0))
+    return fuse_all([box, tube])
+
+def make_deuterium_enricher(P, bus_shape):
+    bb = bus_shape.BoundBox
+    cols = []
+    n = max(2, int(P["D2_enricher_stages"]))
+    for i in range(n):
+        cyl = Part.makeCylinder(mm(0.5), mm(5.0), App.Vector(bb.XMax + mm(2.0 + i*1.0), -mm(3.0), -mm(2.5)), App.Vector(0,0,1))
+        cols.append(cyl)
+    rack = Part.makeBox(mm(5.0), mm(0.4), mm(0.8), App.Vector(bb.XMax + mm(1.8), -mm(3.2), -mm(3.0)))
+    return fuse_all(cols + [rack])
+
+def make_gas_separation_skids(P, bus_shape):
+    bb = bus_shape.BoundBox
+    bed1 = Part.makeBox(mm(2.4), mm(1.2), mm(1.2), App.Vector(bb.XMax + mm(6.0), -mm(0.6), -mm(0.6)))
+    bed2 = Part.makeBox(mm(2.4), mm(1.2), mm(1.2), App.Vector(bb.XMax + mm(8.6), -mm(0.6), -mm(0.6)))
+    tower = Part.makeCylinder(mm(0.8), mm(3.0), App.Vector(bb.XMax + mm(7.2), 0, -mm(0.6)), App.Vector(0,1,0))
+    return fuse_all([bed1, bed2, tower])
+
+def make_cryo_tankfarm(P, bus_shape):
+    bb = bus_shape.BoundBox
+    s1 = Part.makeSphere(mm(3.2), App.Vector(bb.XMin - mm(8.0),  mm(6.0), 0))
+    s2 = Part.makeSphere(mm(3.2), App.Vector(bb.XMin - mm(8.0), -mm(6.0), 0))
+    c1 = Part.makeCylinder(mm(2.0), mm(6.0), App.Vector(bb.XMin - mm(5.0),  mm(8.5), -mm(3.0)), App.Vector(1,0,0))
+    c2 = Part.makeCylinder(mm(2.0), mm(6.0), App.Vector(bb.XMin - mm(5.0), -mm(8.5), -mm(3.0)), App.Vector(1,0,0))
+    rack = Part.makeBox(mm(1.0), mm(20.0), mm(1.0), App.Vector(bb.XMin - mm(5.5), -mm(10.0), -mm(3.5)))
+    return fuse_all([s1, s2, c1, c2, rack])
+
+def make_eclss_module(P, bus_shape):
+    bb = bus_shape.BoundBox
+    L = mm(P["eclss_len_m"]); D = mm(P["eclss_diam_m"])
+    x0 = (bb.XMin + bb.XMax)/2.0 - L/2.0
+    cyl = Part.makeCylinder(D/2.0, L, App.Vector(x0, 0, 0), App.Vector(1,0,0))
+    cyl_in = Part.makeCylinder(D/2.0 - mm(0.25), L - mm(0.5), App.Vector(x0 + mm(0.25), 0, 0), App.Vector(1,0,0))
+    hull = cut_safe(cyl, cyl_in)
+    return hull
+
+def make_greenhouse_rings(P, bus_shape):
+    bb = bus_shape.BoundBox
+    bays = max(1, int(P["greenhouse_bays"]))
+    domes = []
+    r = mm(3.4)
+    for i in range(bays):
+        y = -bb.YLength/2.0 + (i+0.5)*(bb.YLength/bays)
+        dome = Part.makeSphere(r, App.Vector(bb.XMax + mm(10.0), y, 0))
+        cutter = Part.makeBox(mm(10.0), mm(10.0), r, App.Vector(bb.XMax + mm(5.0), y - mm(5.0), 0))
+        dome = cut_safe(dome, cutter)
+        base = Part.makeCylinder(r, mm(0.3), App.Vector(bb.XMax + mm(10.0), y, -mm(0.15)), App.Vector(0,0,1))
+        domes.append(fuse_all([dome, base]))
+    return fuse_all(domes)
+
+# ----------------------------------------------------
+# Nuevas geometrías (más complejas)
+# ----------------------------------------------------
+def make_bus_core(P):
+    L  = mm(P["bus_len_m"])
+    D  = mm(P["bus_diam_m"])
+    t  = mm(P["bus_wall_m"])
+    x0 = -L/2.0
+    outer = Part.makeCylinder(D/2.0, L, App.Vector(x0, 0, 0), App.Vector(1,0,0))
+    inner = Part.makeCylinder(D/2.0 - t, L - 2*t, App.Vector(x0 + t, 0, 0), App.Vector(1,0,0))
+    hull  = cut_safe(outer, inner)
+    spine = Part.makeBox(L, mm(0.6), mm(0.6), App.Vector(x0, -mm(0.3), -mm(0.3)))
+    nF = max(4, int(P["bus_frames_n"]))
+    frames = []
+    for i in range(nF):
+        xi = x0 + (i/(nF-1.0))*L
+        frame = Part.makeTorus(D/2.0 - t*0.5, t*0.25, App.Vector(xi, 0, 0), App.Vector(1,0,0))
+        frames.append(frame)
+    off = (D/2.0 - t*0.8)
+    Lg = Part.makeBox(L, mm(0.25), mm(0.25), App.Vector(x0, off - mm(0.125), -mm(0.125)))
+    Lg2= Part.makeBox(L, mm(0.25), mm(0.25), App.Vector(x0, -off - mm(0.125), -mm(0.125)))
+    Lg3= Part.makeBox(L, mm(0.25), mm(0.25), App.Vector(x0, -mm(0.125),  off - mm(0.125)))
+    Lg4= Part.makeBox(L, mm(0.25), mm(0.25), App.Vector(x0, -mm(0.125), -off - mm(0.125)))
+    return fuse_all([hull, spine, Lg, Lg2, Lg3, Lg4, fuse_all(frames)])
+
+def make_bus_endcones(P, bus_shape):
+    bb = bus_shape.BoundBox
+    Lf = mm(P["nose_len_m"])
+    Rout = mm(P["nose_r_front_m"])
+    nose = Part.makeCone(Rout, mm(0.25), Lf, App.Vector(bb.XMax, 0, 0), App.Vector(1,0,0))
+    Lb = mm(P["tail_len_m"])
+    Rin = mm(P["tail_r_rear_m"])
+    tail= Part.makeCone(Rin, mm(0.6), Lb, App.Vector(bb.XMin - Lb, 0, 0), App.Vector(1,0,0))
+    ring= Part.makeTorus(Rin, mm(0.3), App.Vector(bb.XMin - mm(0.3), 0, 0), App.Vector(1,0,0))
+    return fuse_all([nose, tail, ring])
+
+def make_docking_hub(P, bus_shape):
+    bb = bus_shape.BoundBox
+    xh = bb.XMax - mm(0.6)
+    R  = mm(P["dock_ring_r_m"])
+    t  = mm(P["dock_ring_t_m"])
+    ring = Part.makeTorus(R, t, App.Vector(xh, 0, 0), App.Vector(1,0,0))
+    Lp = mm(P["dock_port_len_m"]); Rp = mm(P["dock_port_rad_m"])
+    ports = []
+    for v in [(0,1,0),(0,-1,0),(0,0,1),(0,0,-1)]:
+        base = App.Vector(xh, 0, 0) + App.Vector(0, v[1]*R, v[2]*R)
+        cyl  = Part.makeCylinder(Rp, Lp, base - App.Vector(Lp,0,0), App.Vector(1,0,0))
+        ports.append(cyl)
+    return fuse_all([ring, fuse_all(ports)])
+
+def make_solar_arrays_3seg(P, bus_shape):
+    bb = bus_shape.BoundBox
+    xhinge = (bb.XMin + bb.XMax)/2.0
+    root_chord = mm(P["sa_chord_m"])
+    seg_span   = mm(P["sa_seg_span_m"])
+    thick = mm(P["sa_thick_m"])
+    gap = mm(0.25)
+    ang_root = float(P["sa_root_deg"])
+    ang_mid  = float(P["sa_mid_deg"])
+    ang_tip  = float(P["sa_tip_deg"])
+    def wing_side(sign):
+        y0 = bb.YMax + gap if sign>0 else bb.YMin - gap - seg_span
+        root = Part.makeBox(thick, seg_span, root_chord, App.Vector(xhinge - thick/2.0, y0, -root_chord/2.0))
+        root = rotate(root, App.Vector(0,0,1), sign*ang_root, App.Vector(xhinge, y0, 0))
+        y1 = y0 + seg_span
+        mid = Part.makeBox(thick, seg_span, root_chord, App.Vector(xhinge - thick/2.0, y1, -root_chord/2.0))
+        mid = rotate(mid, App.Vector(0,0,1), sign*(ang_root+ang_mid), App.Vector(xhinge, y1, 0))
+        y2 = y1 + seg_span
+        tip = Part.makeBox(thick, seg_span, root_chord, App.Vector(xhinge - thick/2.0, y2, -root_chord/2.0))
+        tip = rotate(tip, App.Vector(0,0,1), sign*(ang_root+ang_mid+ang_tip), App.Vector(xhinge, y2, 0))
+        mast = Part.makeBox(mm(0.15), seg_span*3, mm(0.15), App.Vector(xhinge + root_chord/2.0, y0, -mm(0.075)))
+        return fuse_all([root, mid, tip, mast])
+    left  = wing_side(+1)
+    right = wing_side(-1)
+    return fuse_all([left, right])
+
+def make_radiator_banks(P, bus_shape):
+    bb = bus_shape.BoundBox
+    n = max(3, int(P["rad_panels_n"]))
+    span = mm(P["rad_span_m"])
+    chord= mm(P["rad_chord_m"])
+    t    = mm(P["rad_thick_m"])
+    gapy = mm(0.3)
+    offx = (bb.XMin + bb.XMax)/2.0 + mm(P["rad_x_offset_m"])
+    bank_plus = []
+    bank_minus= []
+    for i in range(n):
+        y = -span/2.0 + (i+0.5)*span/n
+        p = Part.makeBox(t, mm(0.9*span/n), chord, App.Vector(offx, y - mm(0.45*span/n), bb.ZMax + gapy))
+        m = Part.makeBox(t, mm(0.9*span/n), chord, App.Vector(offx, y - mm(0.45*span/n), bb.ZMin - gapy - chord))
+        bank_plus.append(p); bank_minus.append(m)
+    standoff1 = Part.makeBox(mm(0.3), span, mm(0.3), App.Vector(offx - mm(0.15), -span/2.0, bb.ZMax + gapy - mm(0.15)))
+    standoff2 = Part.makeBox(mm(0.3), span, mm(0.3), App.Vector(offx - mm(0.15), -span/2.0, bb.ZMin - gapy - chord - mm(0.15)))
+    return fuse_all([fuse_all(bank_plus), fuse_all(bank_minus), standoff1, standoff2])
+
+def make_hga_gimbal(P, bus_shape):
+    bb = bus_shape.BoundBox
+    xA = bb.XMax - mm(1.2)
+    base = Part.makeCylinder(mm(0.35), mm(0.6), App.Vector(xA, 0, 0), App.Vector(1,0,0))
+    yaw  = Part.makeTorus(mm(0.7), mm(0.08), App.Vector(xA + mm(0.6), 0, 0), App.Vector(1,0,0))
+    pitch= Part.makeTorus(mm(0.7), mm(0.08), App.Vector(xA + mm(0.9), 0, 0), App.Vector(0,1,0))
+    R = mm(P["hga_radius_m"]); D = mm(P["hga_depth_m"]); t = mm(P["hga_thick_m"])
+    outer = Part.makeCone(R, mm(0.2), D, App.Vector(xA + mm(1.2), 0, 0), App.Vector(1,0,0))
+    inner = Part.makeCone(R - t, mm(0.2), D - t, App.Vector(xA + mm(1.2) + t, 0, 0), App.Vector(1,0,0))
+    dish  = cut_safe(outer, inner)
+    feed  = Part.makeSphere(mm(0.25), App.Vector(xA + mm(1.2) + D*0.45, 0, 0))
+    arm   = Part.makeCylinder(mm(0.1), D*0.6, App.Vector(xA + mm(1.2) + t*0.6, 0, 0), App.Vector(1,0,0))
+    return fuse_all([base, yaw, pitch, dish, feed, arm])
+
+def make_phased_arrays(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x0 = (bb.XMin + bb.XMax)/2.0
+    w  = mm(P["pa_width_m"]); h = mm(P["pa_height_m"]); t = mm(0.06)
+    off = mm(0.2)
+    p1 = Part.makeBox(t, w, h, App.Vector(x0, bb.YMax + off, -h/2.0))
+    p2 = Part.makeBox(t, w, h, App.Vector(x0, bb.YMin - off - w, -h/2.0))
+    return fuse_all([p1, p2])
+
+def make_rcs_quads(P, bus_shape):
+    bb = bus_shape.BoundBox
+    L = mm(P["rcs_len_m"]); r1 = mm(P["rcs_r_out_m"]); r2 = mm(P["rcs_r_in_m"])
+    offs = mm(P["rcs_offset_m"])
+    xF = bb.XMax - mm(0.5)
+    xR = bb.XMin + mm(0.5)
+    thr = []
+    corners = [(+1,+1),(+1,-1),(-1,+1),(-1,-1)]
+    for (sy, sz) in corners:
+        for x in (xF, xR):
+            y = sy*(bb.YLength/2.0 - offs)
+            z = sz*(bb.ZLength/2.0 - offs)
+            cone = Part.makeCone(r1, r2, L, App.Vector(x, y, z), App.Vector(1,0,0))
+            cone = rotate(cone, App.Vector(0,0,1), -15*sy, App.Vector(x, y, z))
+            cone = rotate(cone, App.Vector(0,1,0),  15*sz, App.Vector(x, y, z))
+            thr.append(cone)
+    return fuse_all(thr)
+
+def make_booms_shields(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x0 = (bb.XMin + bb.XMax)/2.0
+    Lb = mm(P["boom_len_m"])
+    boom = Part.makeCylinder(mm(0.12), Lb, App.Vector(x0, 0, bb.ZMax + mm(0.2)), App.Vector(0,0,1))
+    mass = Part.makeSphere(mm(0.22), App.Vector(x0, 0, bb.ZMax + mm(0.2) + Lb))
+    lga1 = Part.makeCylinder(mm(0.06), mm(1.6), App.Vector(x0, bb.YMax + mm(0.2), 0), App.Vector(0,1,0))
+    lga2 = Part.makeCylinder(mm(0.06), mm(1.6), App.Vector(x0, bb.YMin - mm(1.8), 0), App.Vector(0,1,0))
+    R = bb.ZLength/2.0
+    s1 = Part.makeBox(mm(0.12), mm(2.2), R, App.Vector(bb.XMax + mm(0.6), -mm(1.1), -R/2.0))
+    s2 = Part.makeBox(mm(0.12), mm(2.2), R, App.Vector(bb.XMax + mm(0.9), -mm(1.1), -R/2.0))
+    return fuse_all([boom, mass, lga1, lga2, s1, s2])
+
+def make_truss_outriggers(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x  = (bb.XMin + bb.XMax)/2.0
+    y1 = bb.YMax + mm(0.2); y2 = y1 + mm(2.0)
+    z0 = 0
+    bars = []
+    for sy in (+1, -1):
+        yb1 = y1 if sy>0 else (bb.YMin - mm(0.2))
+        yb2 = y2 if sy>0 else (bb.YMin - mm(2.2))
+        base = Part.makeBox(mm(2.0), mm(0.15), mm(0.15), App.Vector(x - mm(1.0), yb1 - mm(0.075), z0 - mm(0.075)))
+        post = Part.makeBox(mm(0.15), mm(2.0), mm(0.15), App.Vector(x - mm(0.075), sy>0 and yb1 or (yb2), z0 - mm(0.075)))
+        diag = Part.makeBox(mm(2.0), mm(0.15), mm(0.15), App.Vector(x - mm(1.0), yb2 - mm(0.075), z0 - mm(0.075)))
+        diag = rotate(diag, App.Vector(0,0,1), sy>0 and -30 or 30, App.Vector(x - mm(1.0), yb2 - mm(0.075), z0))
+        bars += [base, post, diag]
+    return fuse_all(bars)
+
+def make_cargo_racks(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x0 = (bb.XMin + bb.XMax)/2.0 - mm(1.0)
+    rackW = mm(3.0); rackH = mm(1.2)
+    r1 = Part.makeBox(mm(1.4), rackW, rackH, App.Vector(x0, bb.YMax + mm(0.4), -rackH/2.0))
+    r2 = Part.makeBox(mm(1.4), rackW, rackH, App.Vector(x0, bb.YMin - mm(0.4) - rackW, -rackH/2.0))
+    b1 = Part.makeBox(mm(1.4), mm(0.1), mm(0.1), App.Vector(x0, bb.YMax + mm(0.35), 0))
+    b2 = Part.makeBox(mm(1.4), mm(0.1), mm(0.1), App.Vector(x0, bb.YMin - mm(0.35), 0))
+    return fuse_all([r1, r2, b1, b2])
+
+# ---- Componentes extra (más detalle visual/funcional) ----
+def make_external_batteries(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x = (bb.XMin + bb.XMax)/2.0 + mm(1.0)
+    pack = []
+    for sy in (+1, -1):
+        base = Part.makeBox(mm(1.6), mm(2.0), mm(0.8), App.Vector(x, sy>0 and bb.YMax + mm(0.3) or (bb.YMin - mm(2.3)), -mm(0.4)))
+        lid  = Part.makeCylinder(mm(0.4), mm(1.6), App.Vector(x + mm(1.6), sy>0 and bb.YMax + mm(1.3) or (bb.YMin - mm(1.7)), -mm(0.8)), App.Vector(0,0,1))
+        pack += [base, lid]
+    return fuse_all(pack)
+
+def make_external_tanks(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x = bb.XMin - mm(3.0)
+    t1 = Part.makeCylinder(mm(0.9), mm(3.2), App.Vector(x,  bb.YMax + mm(1.0), -mm(1.6)), App.Vector(1,0,0))
+    t2 = Part.makeCylinder(mm(0.9), mm(3.2), App.Vector(x,  bb.YMin - mm(4.2), -mm(1.6)), App.Vector(1,0,0))
+    straps = []
+    for y in (bb.YMax + mm(1.0), bb.YMin - mm(4.2)):
+        for dz in (-mm(1.2), mm(0.0), mm(1.2)):
+            strap = Part.makeBox(mm(0.2), mm(0.8), mm(0.2), App.Vector(x + mm(1.6), y - mm(0.4), -mm(0.1)+dz))
+            straps.append(strap)
+    return fuse_all([t1, t2, fuse_all(straps)])
+
+def make_cable_trays(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x0 = (bb.XMin + bb.XMax)/2.0 - mm(0.8)
+    trays = []
+    for sy in (+1, -1):
+        y = sy>0 and (bb.YMax + mm(0.15)) or (bb.YMin - mm(0.45))
+        tray = Part.makeBox(mm(3.2), mm(0.3), mm(0.15), App.Vector(x0, y, -mm(0.075)))
+        trays.append(tray)
+    return fuse_all(trays)
+
+def make_low_gain_antennas(P, bus_shape):
+    bb = bus_shape.BoundBox
+    x = bb.XMax - mm(0.4)
+    a1 = Part.makeCone(mm(0.35), mm(0.05), mm(0.7), App.Vector(x,  bb.YMax + mm(0.6), 0), App.Vector(0,1,0))
+    a2 = Part.makeCone(mm(0.35), mm(0.05), mm(0.7), App.Vector(x,  bb.YMin - mm(1.3), 0), App.Vector(0,1,0))
+    return fuse_all([a1, a2])
+
+def make_cameras_and_sun_sensors(P, bus_shape):
+    bb = bus_shape.BoundBox
+    cams = []
+    # 2 cámaras en la nariz (±Z)
+    for sz in (+1, -1):
+        cam = Part.makeCylinder(mm(0.12), mm(0.5), App.Vector(bb.XMax + mm(0.3), 0, sz*mm(0.4)), App.Vector(1,0,0))
+        cams.append(cam)
+    # 4 solares en ±Y±Z
+    suns = []
+    for sy in (+1, -1):
+        for sz in (+1, -1):
+            ss = Part.makeBox(mm(0.05), mm(0.25), mm(0.25),
+                              App.Vector(bb.XMax + mm(0.2), sy>0 and bb.YMax + mm(0.3) or (bb.YMin - mm(0.55)),
+                                         sz>0 and mm(0.1) or -mm(0.35)))
+            suns.append(ss)
+    return fuse_all([fuse_all(cams), fuse_all(suns)])
+
+def make_handrails(P, bus_shape):
+    bb = bus_shape.BoundBox
+    rails = []
+    x0 = (bb.XMin + bb.XMax)/2.0
+    for sy in (+1, -1):
+        y = sy>0 and (bb.YMax + mm(0.1)) or (bb.YMin - mm(0.1))
+        r  = Part.makeCylinder(mm(0.04), mm(5.0), App.Vector(x0 - mm(2.5), y, bb.ZMax + mm(0.2)), App.Vector(1,0,0))
+        rails.append(r)
+    return fuse_all(rails)
+
+# ----------------------------------------------------
+# Ensamblador principal
+# ----------------------------------------------------
+def build_parker_xl_station(P):
+    doc = ensure_doc(DOC_NAME)
+    parts = []
+
+    # Bus y geometrías base
+    bus = make_bus_core(P); parts.append(bus)
+    parts.append(make_bus_endcones(P, bus))
+    parts.append(make_docking_hub(P, bus))
+    parts.append(make_truss_outriggers(P, bus))
+
+    # Potencia/térmico/propulsión (tus módulos existentes)
+    parts.append(make_reactor_core(P, bus))
+    parts.append(make_solar_concentrators(P, bus))
+    parts.append(make_hall_thruster_cluster(P, bus))
+    parts.append(make_vasimr_thruster(P, bus))
+    parts.append(make_magscoop_coil(P, bus))
+    parts.append(make_electrostatic_scoops(P))
+    parts.append(make_tether_reel(P, bus))
+
+    # ISRU / Refinería
+    parts.append(make_isru_drill_rigs(P, bus))
+    parts.append(make_electrolyzer_stack(P, bus))
+    parts.append(make_sabatier_module(P, bus))
+    parts.append(make_deuterium_enricher(P, bus))
+    parts.append(make_gas_separation_skids(P, bus))
+    parts.append(make_cryo_tankfarm(P, bus))
+
+    # ECLSS / hábitat
+    parts.append(make_eclss_module(P, bus))
+    parts.append(make_greenhouse_rings(P, bus))
+
+    # Comunicaciones / GNC / radiadores / arrays
+    parts.append(make_hga_gimbal(P, bus))
+    parts.append(make_low_gain_antennas(P, bus))
+    parts.append(make_cameras_and_sun_sensors(P, bus))
+    parts.append(make_phased_arrays(P, bus))
+    parts.append(make_radiator_banks(P, bus))
+    parts.append(make_solar_arrays_3seg(P, bus))
+    parts.append(make_rcs_quads(P, bus))
+    parts.append(make_booms_shields(P, bus))
+    parts.append(make_cargo_racks(P, bus))
+    parts.append(make_external_batteries(P, bus))
+    parts.append(make_external_tanks(P, bus))
+    parts.append(make_cable_trays(P, bus))
+    parts.append(make_handrails(P, bus))
+
+    # Fusión total
+    full = fuse_all(parts)
+    obj = add_obj(full, "Parker_XL_Fused", color=(0.78, 0.80, 0.84))
+    App.ActiveDocument.recompute()
+    return obj
+
+# ----------------------------------------------------
+# Parámetros por defecto (coherentes entre sí)
+# ----------------------------------------------------
+P = {
+    # Bus
+    "bus_len_m":        26.0,
+    "bus_diam_m":        6.0,
+    "bus_wall_m":        0.20,
+    "bus_frames_n":     12,
+    # Nariz / Cola
+    "nose_len_m":        1.9,
+    "nose_r_front_m":    3.0,
+    "tail_len_m":        1.6,
+    "tail_r_rear_m":     2.8,
+    # Docking
+    "dock_ring_r_m":     2.2,
+    "dock_ring_t_m":     0.15,
+    "dock_port_len_m":   1.2,
+    "dock_port_rad_m":   0.6,
+    # Alas solares (3 segmentos)
+    "sa_chord_m":        2.2,
+    "sa_seg_span_m":     3.0,
+    "sa_thick_m":        0.10,
+    "sa_root_deg":      12.0,
+    "sa_mid_deg":        7.0,
+    "sa_tip_deg":        4.0,
+    # Radiadores
+    "rad_panels_n":       8,
+    "rad_span_m":         9.0,
+    "rad_chord_m":        2.2,
+    "rad_thick_m":        0.10,
+    "rad_x_offset_m":     0.4,
+    # HGA
+    "hga_radius_m":       1.9,
+    "hga_depth_m":        0.55,
+    "hga_thick_m":        0.06,
+    # RCS
+    "rcs_len_m":          0.7,
+    "rcs_r_out_m":        0.16,
+    "rcs_r_in_m":         0.05,
+    "rcs_offset_m":       0.6,
+    # Booms
+    "boom_len_m":         3.6,
+    # Módulos previos
+    "solar_area_m2":     30.0,
+    "hall_clusters":      4,
+    "hall_diam_m":        1.6,
+    "magscoop_radius_m":  5.0,
+    "electrostatic_cones":8,
+    "isru_drills":        3,
+    "D2_enricher_stages": 4,
+    "eclss_len_m":       12.0,
+    "eclss_diam_m":       4.2,
+    "greenhouse_bays":    2,
+}
+
+def build_parker_xl_station(P):
+    doc = ensure_doc(DOC_NAME)
+    parts = []
+
+    # Bus y estructura
+    bus = make_bus_core(P)
+    parts.append(bus)
+    parts.append(make_bus_endcones(P, bus))
+    parts.append(make_docking_hub(P, bus))
+    parts.append(make_truss_outriggers(P, bus))
+
+    # Energía y térmico
+    parts.append(make_reactor_core(P, bus))
+    parts.append(make_solar_concentrators(P, bus))
+
+    # Propulsión
+    parts.append(make_hall_thruster_cluster(P, bus))
+    parts.append(make_vasimr_thruster(P, bus))
+    parts.append(make_magscoop_coil(P, bus))
+    parts.append(make_electrostatic_scoops(P))
+    parts.append(make_tether_reel(P, bus))
+
+    # ISRU / Refinería
+    parts.append(make_isru_drill_rigs(P, bus))
+    parts.append(make_electrolyzer_stack(P, bus))
+    parts.append(make_sabatier_module(P, bus))
+    parts.append(make_deuterium_enricher(P, bus))
+    parts.append(make_gas_separation_skids(P, bus))
+    parts.append(make_cryo_tankfarm(P, bus))
+
+    # ECLSS / hábitat
+    parts.append(make_eclss_module(P, bus))
+    parts.append(make_greenhouse_rings(P, bus))
+
+    # Comunicaciones / instrumentación
+    parts.append(make_hga_gimbal(P, bus))
+    parts.append(make_low_gain_antennas(P, bus))
+    parts.append(make_cameras_and_sun_sensors(P, bus))
+    parts.append(make_phased_arrays(P, bus))
+
+    # Otros subsistemas
+    parts.append(make_radiator_banks(P, bus))
+    parts.append(make_solar_arrays_3seg(P, bus))
+    parts.append(make_rcs_quads(P, bus))
+    parts.append(make_booms_shields(P, bus))
+    parts.append(make_cargo_racks(P, bus))
+    parts.append(make_external_batteries(P, bus))
+    parts.append(make_external_tanks(P, bus))
+    parts.append(make_cable_trays(P, bus))
+    parts.append(make_handrails(P, bus))
+
+    # Fusión y añadido al documento
+    full_shape = fuse_all(parts)
+    obj = add_obj(full_shape, "Parker_XL_Fused", color=(0.78,0.80,0.84))
+    App.ActiveDocument.recompute()
+    return obj
+
+if __name__ == "__main__":
+    ensure_doc(DOC_NAME)
+    estacion = build_parker_xl_station(P)
+    if HAS_GUI:
+        estacion.ViewObject.Visibility = True
+        Gui.activeDocument().activeView().viewAxonometric()
+        Gui.SendMsgToActiveView("ViewFit")
+    print("Generado:", estacion.Name)
+
+

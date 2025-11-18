@@ -1,0 +1,289 @@
+# -*- coding: utf-8 -*-
+# Space Station-like paramétrica — FreeCAD Macro con exportación STEP (AP214)
+# Autor: Víctor + Copilot
+
+import math
+import FreeCAD as App
+import Part
+
+# ===================== Parámetros globales (mm) =====================
+# Nodo central
+node_radius = 600.0
+node_length = 1400.0
+node_t = 8.0
+
+# Módulos presurizados (habitables/lab)
+hab_d = 4500.0
+hab_L = 9000.0
+lab_d = 4000.0
+lab_L = 8000.0
+corr_d = 2000.0
+corr_L = 4500.0
+
+# Truss dorsal y mástiles
+truss_L = 22000.0
+truss_h = 1200.0
+truss_w = 1000.0
+mast_L  = 6000.0
+mast_r  = 250.0
+
+# Radiadores
+rad_w = 4500.0
+rad_h = 9000.0
+rad_t = 80.0
+rad_offset = 1500.0
+
+# Paneles solares
+sa_span = 32000.0   # en Y por lado
+sa_chord = 3000.0   # en X
+sa_t = 80.0
+sa_hinge_r = 350.0
+sa_hinge_L = 1200.0
+
+# Antenas
+hga_d = 3000.0
+hga_depth = 500.0
+hga_boom = 2500.0
+mga_r = 800.0
+mga_h = 250.0
+
+# Puertos de acoplamiento (IDSS/CBM)
+port_d = 1200.0
+port_t = 220.0
+port_ring_w = 250.0
+
+# Anillo giratorio opcional
+ring_outer_r = 14000.0
+ring_toro_r  = 1500.0
+ring_pitch   = 2000.0   # separación de segmentos
+ring_span    = 24000.0  # longitud del arco (mm) -> calcula ángulo ~ span/R
+
+# Export
+export_path = App.getUserAppDataDir() + "SpaceStation_Modular.step"
+export_as_single_compound = False
+
+# ===================== Utilidades =====================
+def add_part(doc, shape, name, color=(0.8,0.8,0.8), tr=0):
+    o = doc.addObject("Part::Feature", name)
+    o.Shape = shape
+    o.ViewObject.ShapeColor = color
+    o.ViewObject.Transparency = int(tr*100) if tr<=1 else int(tr)
+    return o
+
+def place(shape, base=App.Vector(0,0,0), axis=App.Vector(0,0,1), ang=0):
+    s = shape.copy()
+    pl = App.Placement()
+    pl.Rotation = App.Rotation(axis, ang)
+    pl.Base = base
+    s.Placement = pl
+    return s
+
+def torus(R, r):
+    return Part.makeTorus(R, r)
+
+def ring(r_outer, r_inner, h):
+    return Part.makeCylinder(r_outer, h).cut(Part.makeCylinder(r_inner, h))
+
+def cylinder_shell(r_outer, t, h):
+    return Part.makeCylinder(r_outer, h).cut(Part.makeCylinder(r_outer - t, h))
+
+def cone_shell(r1, r2, h, t):
+    outer = Part.makeCone(r1, r2, h)
+    inner = Part.makeCone(r1 - t, r2 - t, h)
+    return outer.cut(inner)
+
+def dish(d, depth, t=10, steps=72):
+    # Paraboloide simple a partir de cono truncado aproximado
+    r0 = d/2.0
+    h  = depth
+    outer = Part.makeCone(r0, r0*0.2, h)
+    inner = Part.makeCone(r0 - t, (r0 - t)*0.2, h - t)
+    inner.translate(App.Vector(0,0,t))
+    return outer.cut(inner)
+
+# ===================== Submódulos =====================
+def build_node(doc):
+    body = cylinder_shell(node_radius, node_t, node_length)
+    body = place(body, base=App.Vector(-node_length/2, 0, 0), axis=App.Vector(0,1,0), ang=90)
+    return [add_part(doc, body, "Node_Core", (0.7,0.7,0.75))]
+
+def build_port(doc, where, normal):
+    # where: App.Vector posición centro del puerto
+    # normal: App.Vector dirección normal (unitaria)
+    flange = ring(port_d/2 + port_ring_w, port_d/2, port_t)
+    # Orientar +Z del flange hacia 'normal'
+    # Truco: Part::Feature no rota por eje arbitrario sobre normal fácilmente sin matriz; aproximamos con ejes simples
+    # Si normal ~ +/-X, +/-Y, +/-Z usamos combinaciones de rotaciones
+    nx, ny, nz = normal.x, normal.y, normal.z
+    orient = App.Vector(0,0,1)
+    shape = flange
+    if abs(nx) > 0.9:
+        shape = place(shape, axis=App.Vector(0,1,0), ang=90 if nx>0 else -90)
+    elif abs(ny) > 0.9:
+        shape = place(shape, axis=App.Vector(1,0,0), ang=-90 if ny>0 else 90)
+    elif abs(nz) > 0.9:
+        # ya está mirando +Z; si -Z, rotar 180
+        if nz < 0: shape = place(shape, axis=App.Vector(1,0,0), ang=180)
+    shape.translate(where)
+    return [add_part(doc, shape, "Port", (0.9,0.9,0.95))]
+
+def build_pressurized_module(doc, d, L, name, base=App.Vector(0,0,0), axis=App.Vector(1,0,0)):
+    shell = cylinder_shell(d/2.0, 10.0, L)
+    shell = place(shell, base=App.Vector(-L/2,0,0), axis=App.Vector(0,1,0), ang=90)  # eje X
+    # Rotar hacia axis
+    # Simplificado: soportamos X, Y, Z cardinales
+    if axis == App.Vector(0,1,0):
+        shell = place(shell, axis=App.Vector(0,0,1), ang=90)
+    elif axis == App.Vector(0,0,1):
+        shell = place(shell, axis=App.Vector(0,1,0), ang=90)
+    shell.translate(base)
+    return [add_part(doc, shell, name, (0.85,0.85,0.9))]
+
+def build_truss(doc):
+    # Caja principal
+    core = Part.makeBox(truss_L, truss_w, truss_h)
+    core.translate(App.Vector(-truss_L/2.0, -truss_w/2.0, -truss_h/2.0))
+    parts = [add_part(doc, core, "Truss_Core", (0.6,0.6,0.65))]
+    # Diagonales tubulares cada 2m
+    step = 2000.0
+    n = int(truss_L/step)
+    for i in range(n+1):
+        x = -truss_L/2.0 + i*step
+        for s in (-1,1):
+            rod = Part.makeCylinder(60.0, math.sqrt((step/2.0)**2 + (truss_h/2.0)**2))
+            rod = place(rod, axis=App.Vector(0,0,1), ang=90)
+            # inclinar algo en Z
+            rod = place(rod, axis=App.Vector(1,0,0), ang=25*s)
+            rod.translate(App.Vector(x, 0, 0))
+            parts.append(add_part(doc, rod, f"Truss_Diag_{i}_{s}", (0.7,0.7,0.75)))
+    return parts
+
+def build_radiator(doc, side=+1):
+    plate = Part.makeBox(rad_w, rad_t, rad_h)
+    plate.translate(App.Vector(-rad_w/2, -rad_t/2, -rad_h/2))
+    x = 0
+    y = side*(truss_w/2.0 + rad_offset)
+    z = 0
+    plate.translate(App.Vector(x, y, z))
+    parts = [add_part(doc, plate, f"Radiator_{'P' if side>0 else 'N'}", (0.92,0.92,1.0))]
+    # Aletas
+    fins = 18
+    for i in range(fins):
+        fx = -rad_w/2 + (i+1)*rad_w/(fins+1)
+        fin = Part.makeBox(40.0, rad_t+20.0, rad_h-400.0)
+        fin.translate(App.Vector(fx-20.0, - (rad_t+20.0)/2, - (rad_h-400.0)/2))
+        fin.translate(App.Vector(x, y, z))
+        parts.append(add_part(doc, fin, f"RadFin_{side}_{i}", (0.85,0.85,0.95)))
+    return parts
+
+def build_solar_array(doc, side=+1):
+    # Hinge en truss
+    hinge = Part.makeCylinder(sa_hinge_r, sa_hinge_L, App.Vector(-sa_hinge_L/2,0,0), App.Vector(1,0,0))
+    hinge.translate(App.Vector(0, side*(truss_w/2.0 + sa_hinge_r + 50.0), truss_h/2.0))
+    p_hinge = add_part(doc, hinge, f"SA_Hinge_{'P' if side>0 else 'N'}", (0.75,0.75,0.8))
+    # Panel
+    panel = Part.makeBox(sa_chord, sa_t, sa_span)
+    panel.translate(App.Vector(0, -sa_t/2.0, -sa_span/2.0))
+    panel.translate(App.Vector(sa_hinge_L/2.0 + 200.0, side*(truss_w/2.0 + sa_hinge_r + 50.0), truss_h/2.0))
+    p_panel = add_part(doc, panel, f"SA_Panel_{'P' if side>0 else 'N'}", (0.1,0.15,0.5))
+    return [p_hinge, p_panel]
+
+def build_hga(doc, pos=App.Vector(0,0,0), axis=App.Vector(1,0,0)):
+    # Boom + plato
+    boom = Part.makeCylinder(200.0, hga_boom, pos, axis)
+    # Plato
+    dish_s = dish(hga_d, hga_depth, t=12)
+    if axis == App.Vector(1,0,0):
+        dish_s = place(dish_s, axis=App.Vector(0,1,0), ang=90)
+        dish_s.translate(App.Vector(pos.x + hga_boom, pos.y, pos.z))
+    return [add_part(doc, boom, "HGA_Boom", (0.7,0.7,0.75)), add_part(doc, dish_s, "HGA_Dish", (0.95,0.95,0.98))]
+
+def build_mga_pair(doc, base=App.Vector(0,0,0)):
+    a1 = Part.makeCylinder(mga_r, mga_h, base, App.Vector(1,0,0))
+    a2 = Part.makeCylinder(mga_r*0.85, mga_h, base.add(App.Vector(0,800.0,400.0)), App.Vector(1,0,0))
+    return [add_part(doc, a1, "MGA_1", (0.95,0.95,1.0)), add_part(doc, a2, "MGA_2", (0.95,0.95,1.0))]
+
+def build_idss_port(doc, base=App.Vector(0,0,0), normal=App.Vector(1,0,0)):
+    return build_port(doc, base, normal)
+
+def build_ring_hab(doc, center=App.Vector(0,0,0)):
+    # Toroide habitable (simplificado)
+    t = torus(ring_outer_r, ring_toro_r)
+    t = place(t, base=center, axis=App.Vector(0,1,0), ang=90)
+    return [add_part(doc, t, "SpinRing", (0.8,0.8,0.82))]
+
+def build_mast(doc, base=App.Vector(0,0,0), axis=App.Vector(0,0,1)):
+    m = Part.makeCylinder(mast_r, mast_L, base, axis)
+    return [add_part(doc, m, "Mast", (0.7,0.7,0.75))]
+
+def build_corridor(doc, base=App.Vector(0,0,0), axis=App.Vector(1,0,0), name="Corridor"):
+    return build_pressurized_module(doc, corr_d, corr_L, name, base, axis)
+
+def build_hab(doc, base=App.Vector(0,0,0), axis=App.Vector(1,0,0), name="Hab"):
+    return build_pressurized_module(doc, hab_d, hab_L, name, base, axis)
+
+def build_lab(doc, base=App.Vector(0,0,0), axis=App.Vector(1,0,0), name="Lab"):
+    return build_pressurized_module(doc, lab_d, lab_L, name, base, axis)
+
+# ===================== Ensamblado =====================
+def build_station(doc):
+    parts = []
+
+    # Nodo central
+    parts += build_node(doc)
+
+    # Truss dorsal a lo largo de X
+    tr = Part.makeBox(truss_L, truss_w, truss_h)
+    tr.translate(App.Vector(-truss_L/2.0, -truss_w/2.0, node_radius + truss_h/2.0 + 600.0))
+    parts.append(add_part(doc, tr, "Truss_Main", (0.62,0.62,0.66)))
+
+    # Radiadores en ±Y
+    parts += build_radiator(doc, side=+1)
+    parts += build_radiator(doc, side=-1)
+
+    # Paneles solares en ±Y (sobre el truss)
+    parts += build_solar_array(doc, side=+1)
+    parts += build_solar_array(doc, side=-1)
+
+    # Módulos presurizados acoplados a Node (X, Y, Z)
+    parts += build_hab(doc, base=App.Vector(node_length/2.0 + 2000.0, 0, 0), axis=App.Vector(1,0,0), name="Hab_Xplus")
+    parts += build_lab(doc, base=App.Vector(-node_length/2.0 - 2000.0, 0, 0), axis=App.Vector(1,0,0), name="Lab_Xminus")
+    parts += build_corridor(doc, base=App.Vector(0, node_radius + corr_L/2.0 + 800.0, 0), axis=App.Vector(0,1,0), name="Corr_Yplus")
+    parts += build_corridor(doc, base=App.Vector(0, -node_radius - corr_L/2.0 - 800.0, 0), axis=App.Vector(0,1,0), name="Corr_Yminus")
+    parts += build_corridor(doc, base=App.Vector(0, 0, node_radius + corr_L/2.0 + 800.0), axis=App.Vector(0,0,1), name="Corr_Zplus")
+
+    # Puertos de acoplamiento (IDSS)
+    parts += build_idss_port(doc, base=App.Vector(node_length/2.0 + 100.0, 0, 0), normal=App.Vector(1,0,0))
+    parts += build_idss_port(doc, base=App.Vector(-node_length/2.0 - 100.0, 0, 0), normal=App.Vector(-1,0,0))
+    parts += build_idss_port(doc, base=App.Vector(0, node_radius + 500.0, 0), normal=App.Vector(0,1,0))
+    parts += build_idss_port(doc, base=App.Vector(0, -node_radius - 500.0, 0), normal=App.Vector(0,-1,0))
+    parts += build_idss_port(doc, base=App.Vector(0, 0, node_radius + 500.0), normal=App.Vector(0,0,1))
+
+    # Antenas: HGA al frente + MGA par lateral
+    parts += build_hga(doc, pos=App.Vector(node_length/2.0 + 1500.0, 0, 0), axis=App.Vector(1,0,0))
+    parts += build_mga_pair(doc, base=App.Vector(0, node_radius + 1500.0, 300.0))
+
+    # Mástil superior (magnetómetros / cámaras)
+    parts += build_mast(doc, base=App.Vector(0,0, node_radius + truss_h + 1200.0), axis=App.Vector(0,0,1))
+
+    # Anillo giratorio opcional (hab)
+    parts += build_ring_hab(doc, center=App.Vector(-6000.0, 0, -ring_outer_r - 3000.0))
+
+    return parts
+
+# ===================== Ejecutar y exportar =====================
+doc = App.newDocument("SpaceStation_Modular")
+objs = build_station(doc)
+doc.recompute()
+
+try:
+    if export_as_single_compound:
+        comp = Part.Compound([o.Shape for o in objs if hasattr(o, "Shape")])
+        tmp = doc.addObject("Part::Feature", "AssemblyCompound")
+        tmp.Shape = comp
+        Part.export([tmp], export_path)
+    else:
+        Part.export(objs, export_path)
+    App.Console.PrintMessage("Exportado STEP en: {}\n".format(export_path))
+except Exception as e:
+    App.Console.PrintError("Error exportando STEP: {}\n".format(e))

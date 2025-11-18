@@ -1,0 +1,760 @@
+# -*- coding: utf-8 -*-
+# Macro FreeCAD: Ensamblajes que se tocan físicamente y se fusionan en un único sólido
+
+import FreeCAD as App
+import Part
+try:
+    import FreeCADGui as Gui
+    HAS_GUI = True
+except Exception:
+    HAS_GUI = False
+
+# -----------------------
+# Utilidades generales
+# -----------------------
+
+def m(x):
+    # Trabajamos en metros de forma declarativa; convertimos a mm para FreeCAD
+    return float(x) * 1000.0
+
+def ensure_doc(name="Ensamble"):
+    doc = App.ActiveDocument
+    if doc is None:
+        doc = App.newDocument(name)
+    return doc
+
+def set_color(obj, rgb=(0.8,0.8,0.8), transparency=0):
+    if not HAS_GUI: 
+        return obj
+    v = obj.ViewObject
+    v.ShapeColor = rgb
+    v.Transparency = transparency
+    return obj
+
+def add_obj(shape, name, color=(0.7,0.7,0.7), transparency=0):
+    doc = ensure_doc()
+    feat = doc.addObject("Part::Feature", name)
+    feat.Shape = shape
+    set_color(feat, color, transparency)
+    return feat
+
+def fuse_all(shapes):
+    # Fusiona iterativamente, con saneado básico
+    if not shapes:
+        return None
+    fused = shapes[0]
+    for s in shapes[1:]:
+        fused = fused.fuse(s)
+        try:
+            fused = fused.removeSplitter()
+        except Exception:
+            pass
+        try:
+            fused.fix(1e-6, 1e-6, 1e-6)
+        except Exception:
+            pass
+    return fused
+
+def bbox(shape):
+    return shape.BoundBox
+
+def translate(s, dx=0, dy=0, dz=0):
+    sc = s.copy()
+    sc.translate(App.Vector(dx, dy, dz))
+    return sc
+
+def rotate_z(s, deg, center=None):
+    sc = s.copy()
+    if center is None:
+        center = App.Vector(0,0,0)
+    axis = App.Vector(0,0,1)
+    sc.rotate(center, axis, deg)
+    return sc
+
+def overlap_eps():
+    # pequeño solape para que la fusión sea robusta (en mm)
+    return m(0.02)  # 2 cm
+
+# -----------------------
+# Parámetros por defecto
+# -----------------------
+
+DEFAULTS = {
+    # Bus
+    "bus_len_m": 18.0,
+    "bus_diam_m": 6.0,
+
+    # Offsets de refinado (si los quieres usar afuera)
+    "refine_off_x": 6.0,
+    "refine_off_y": 0.0,
+    "refine_off_z": -1.0,
+
+    # Energía / térmico
+    "solar_area_m2": 80.0,
+    "rad_span_m": 22.0,
+
+    # Vida / agro
+    "eclss_len_m": 10.0,
+    "eclss_diam_m": 6.0,
+    "greenhouse_bays": 3,
+
+    # Prop eléctrica
+    "hall_clusters": 4,
+    "hall_diam_m": 1.2,
+    "vasimr_enable": True,
+
+    # Recolección
+    "magscoop_radius_m": 80.0,
+    "electrostatic_cones": 8,
+    "tether_length_km": 5.0,
+
+    # ISRU
+    "isru_drills": 2,
+    "electrolyzer_rate_kgph": 20.0,
+    "sabatier_rate_kgph": 12.0,
+    "D2_enricher_stages": 4,
+
+    # Criogénicos (volúmenes de referencia)
+    "cryo_LH2_m3": 300.0,
+    "cryo_LOX_m3": 160.0,
+    "cryo_CH4_m3": 100.0,
+    "cryo_Ar_m3": 180.0,
+}
+
+def with_defaults(P):
+    Q = dict(DEFAULTS)
+    Q.update(P or {})
+    return Q
+
+# -----------------------
+# Geometría base/montaje
+# -----------------------
+
+def make_bus(P):
+    # Cilindro (sólido) alineado en Z
+    L = m(P["bus_len_m"])
+    R = m(P["bus_diam_m"]/2.0)
+    core = Part.makeCylinder(R, L)
+    # Aletas/marcos para facilitar contacto con anexos
+    ring_th = m(0.3)
+    ring_w = m(0.5)
+    ring = Part.makeCylinder(R+ring_w, ring_th)
+    ring2 = translate(ring, dz=L-ring_th)
+    # Placa dorsal para thrusters (disco más grueso)
+    back = Part.makeCylinder(R*0.9, m(0.6))
+    back = translate(back, dz=-m(0.3))  # entra 0.3 m dentro para solapar
+    bus = core.fuse([ring, ring2, back])
+    return bus
+
+def make_mount_bracket(width_m, height_m, depth_m):
+    return Part.makeBox(m(width_m), m(depth_m), m(height_m))
+
+def make_panel(width_m, height_m, thick_m=0.08):
+    # Panel delgado (placa)
+    return Part.makeBox(m(width_m), m(thick_m), m(height_m))
+
+def make_pipe(radius_m, length_m):
+    return Part.makeCylinder(m(radius_m), m(length_m))
+
+def make_tank(radius_m, length_m, rounded=True):
+    cyl = Part.makeCylinder(m(radius_m), m(length_m))
+    if not rounded:
+        return cyl
+    cap = Part.makeSphere(m(radius_m))
+    cap2 = Part.makeSphere(m(radius_m))
+    cap2 = translate(cap2, dz=m(length_m))
+    # Cortar hemisferios
+    hplane = Part.makeBox(m(radius_m*2), m(radius_m*2), m(radius_m*2))
+    hplane = translate(hplane, dx=-m(radius_m), dy=-m(radius_m), dz=0)
+    cap = cap.common(hplane)  # mitad superior
+    cap2 = translate(cap2, dz=-m(radius_m*2))
+    cap3 = Part.makeSphere(m(radius_m))
+    cap3 = translate(cap3, dz=m(length_m))
+    cap3 = cap3.common(hplane)  # mitad superior movida
+    tank = cyl.fuse([cap, cap3])
+    return tank
+
+# -----------------------
+# Módulos (implementaciones simples pero sólidas)
+# -----------------------
+
+def make_reactor_core(P, bus=None):
+    R = m(P["bus_diam_m"]/2.5)
+    L = m(3.0)
+    core = Part.makeCylinder(R, L)
+    # blindaje
+    sh = Part.makeCylinder(R*1.25, L*0.6)
+    core = core.fuse(translate(sh, dz=L*0.2))
+    return core
+
+def make_solar_concentrators(P, bus=None):
+    # Estructura: mástil + dos alas
+    span = m(max(12.0, P["rad_span_m"]/2.0))
+    mast = Part.makeBox(m(0.6), m(0.6), span*2)
+    # Paneles como placas delgadas
+    wing = make_panel(10.0, 4.0, 0.06)
+    wingL = translate(wing, dx=-m(5.0), dz=span*0.6)
+    wingR = translate(wing, dx=-m(5.0), dz=-span*1.2)
+    # Yugo que toca el bus
+    yoke = Part.makeBox(m(0.8), m(1.0), m(2.0))
+    yoke = translate(yoke, dy=-m(0.5))
+    return mast.fuse([wingL, wingR, yoke])
+
+def make_radiator_wings(P, bus=None):
+    span = m(P["rad_span_m"])
+    plate = make_panel(span/1000.0, 3.0, 0.05)  # ancho en m
+    plate = translate(plate, dx=-span/2.0)
+    plate2 = translate(plate, dz=m(3.5))
+    spine = Part.makeBox(m(0.4), m(0.6), m(8.0))
+    spine = translate(spine, dy=-m(0.3), dz=m(-1.0))
+    return plate.fuse([plate2, spine])
+
+def make_isru_drill_rigs(P, bus=None):
+    n = max(1, int(P["isru_drills"]))
+    rigs = []
+    base = Part.makeBox(m(2.0), m(2.0), m(0.4))
+    base = translate(base, dz=-m(0.2))  # solapa
+    for i in range(n):
+        drill = Part.makeCylinder(m(0.25), m(6.0))
+        head = Part.makeCylinder(m(0.4), m(0.6))
+        rig = translate(base, dx=m(2.5*i))
+        rig = rig.fuse(translate(drill, dx=m(1.0+2.5*i), dz=-m(6.0)))
+        rig = rig.fuse(translate(head, dx=m(1.0+2.5*i), dz=-m(6.6)))
+        rigs.append(rig)
+    out = rigs[0]
+    for r in rigs[1:]:
+        out = out.fuse(r)
+    return out
+
+def make_electrolyzer_stack(P, bus=None):
+    skid = Part.makeBox(m(3.5), m(2.0), m(1.2))
+    cols = Part.makeCylinder(m(0.35), m(1.6))
+    cols2 = translate(cols, dx=m(1.2))
+    cols3 = translate(cols, dx=m(2.4))
+    return translate(skid, dz=-m(0.1)).fuse([cols, cols2, cols3])
+
+def make_sabatier_module(P, bus=None):
+    frame = Part.makeBox(m(2.8), m(1.8), m(1.4))
+    drum = Part.makeCylinder(m(0.7), m(2.0))
+    drum = rotate_z(drum, 90)
+    drum = translate(drum, dx=m(1.4), dy=m(0.9), dz=m(0.7))
+    return translate(frame, dz=-m(0.1)).fuse(drum)
+
+def make_cryo_tankfarm(P, bus=None, spec=None):
+    # Deriva tamaños de volúmenes: V = pi*r^2*h
+    def cyl_from_volume(V_m3, L_m):
+        import math
+        r = (V_m3/(math.pi*L_m))**0.5
+        return max(0.6, min(2.5, r)), L_m
+    rH2, lH2 = cyl_from_volume(P["cryo_LH2_m3"], 10.0)
+    rO2, lO2 = cyl_from_volume(P["cryo_LOX_m3"], 8.0)
+    rCH4, lCH4 = cyl_from_volume(P["cryo_CH4_m3"], 7.0)
+    rAr, lAr   = cyl_from_volume(P["cryo_Ar_m3"], 8.0)
+
+    tH2 = make_tank(rH2, lH2, True)
+    tO2 = make_tank(rO2, lO2, True)
+    tCH4 = make_tank(rCH4, lCH4, True)
+    tAr = make_tank(rAr, lAr, True)
+
+    # Monta en bancada común con solape
+    pad = Part.makeBox(m(14.0), m(4.0), m(0.6))
+    pad = translate(pad, dz=-m(0.3))
+    tH2 = translate(tH2, dx=m(1.0))
+    tO2 = translate(tO2, dx=m(4.5))
+    tCH4 = translate(tCH4, dx=m(7.5))
+    tAr = translate(tAr, dx=m(10.5))
+    return pad.fuse([tH2, tO2, tCH4, tAr])
+
+def make_deuterium_enricher(P, bus=None):
+    stages = max(1, int(P["D2_enricher_stages"]))
+    stack = None
+    for i in range(stages):
+        seg = Part.makeCylinder(m(0.5), m(1.2))
+        seg = translate(seg, dz=m(0.9*i))
+        stack = seg if stack is None else stack.fuse(seg)
+    base = Part.makeBox(m(1.8), m(1.8), m(0.3))
+    base = translate(base, dz=-m(0.15))
+    return stack.fuse(base)
+
+def make_gas_separation_skids(P, bus=None):
+    skid = Part.makeBox(m(4.0), m(2.2), m(1.2))
+    cols = []
+    for i in range(4):
+        c = Part.makeCylinder(m(0.35), m(1.4))
+        c = translate(c, dx=m(0.7*i+0.5), dy=m(1.1), dz=m(0.4))
+        cols.append(c)
+    return translate(skid, dz=-m(0.1)).fuse(cols)
+
+def make_magscoop_coil(P, bus=None):
+    R = m(P["magscoop_radius_m"])
+    # Aproximación: toro + aro soporte; nos quedamos con un aro pequeño para no desbordar
+    r = m(0.25)
+    ring = Part.makeTorus(m(6.0), r)  # visual simbólica
+    strut = Part.makeBox(m(0.4), m(0.4), m(4.0))
+    strut = translate(strut, dz=-m(2.0))
+    return ring.fuse(strut)
+
+def make_electrostatic_scoops(P, bus=None):
+    n = max(1, int(P["electrostatic_cones"]))
+    cones = []
+    for i in range(n):
+        c = Part.makeCone(m(0.6), m(0.1), m(1.2))
+        c = translate(c, dx=m(0.8*i), dz=m(0.4))
+        cones.append(c)
+    rail = Part.makeBox(m(0.2*n+0.4), m(0.5), m(0.5))
+    rail = translate(rail, dz=-m(0.25))
+    return rail.fuse(cones)
+
+def make_tether_reel(P, bus=None):
+    drum = Part.makeCylinder(m(0.7), m(0.8))
+    fl1 = Part.makeCylinder(m(1.1), m(0.08))
+    fl2 = translate(fl1, dz=m(0.72))
+    base = Part.makeBox(m(1.4), m(1.0), m(0.3))
+    base = translate(base, dx=-m(0.7), dy=-m(0.5), dz=-m(0.15))
+    return drum.fuse([fl1, fl2, base])
+
+def make_hall_thruster_cluster(P, bus=None, prop="Ar"):
+    n = max(1, int(P["hall_clusters"]))
+    R = m(P["hall_diam_m"]/2.0)
+    plate = Part.makeBox(m(1.2*n+0.6), m(1.2), m(0.4))
+    plate = translate(plate, dx=-m(0.6), dy=-m(0.6), dz=-m(0.2))
+    thr = []
+    for i in range(n):
+        t = Part.makeCylinder(R, m(0.8))
+        t = translate(t, dx=m(1.2*i), dz=-m(0.8))
+        thr.append(t)
+    return plate.fuse(thr)
+
+def make_vasimr_thruster(P, bus=None):
+    if not P.get("vasimr_enable", True):
+        return Part.makeBox(m(0.01), m(0.01), m(0.01))  # dummy diminuto
+    nozzle = Part.makeCone(m(1.0), m(0.4), m(1.6))
+    tube = Part.makeCylinder(m(0.5), m(1.4))
+    return translate(tube, dz=-m(1.4)).fuse(nozzle)
+
+def make_rcs_green(P, bus=None):
+    pod = Part.makeBox(m(1.2), m(1.2), m(0.8))
+    jets = []
+    for a in [0, 90, 180, 270]:
+        j = Part.makeCylinder(m(0.12), m(0.35))
+        j = rotate_z(j, a)
+        j = translate(j, dx=m(0.6), dz=m(0.2))
+        jets.append(j)
+    return translate(pod, dz=-m(0.2)).fuse(jets)
+
+def make_iss_style_hab(P, bus=None):
+    L = m(P["eclss_len_m"])
+    R = m(P["eclss_diam_m"]/2.0)
+    cyl = Part.makeCylinder(R, L)
+    ring = Part.makeCylinder(R*1.05, m(0.25))
+    ring = translate(ring, dz=-m(0.125))
+    return cyl.fuse(ring)
+
+def make_greenhouse_rings(P, bus=None):
+    bays = max(1, int(P["greenhouse_bays"]))
+    rings = []
+    for i in range(bays):
+        torus = Part.makeTorus(m(2.8), m(0.25))
+        torus = translate(torus, dx=m(1.2*i))
+        rings.append(torus)
+    spine = Part.makeBox(m(1.2*bays+0.6), m(0.6), m(0.6))
+    spine = translate(spine, dx=-m(0.3), dy=-m(0.3), dz=-m(0.3))
+    return spine.fuse(rings)
+
+def make_water_jacket(P, bus=None):
+    R = m(P["bus_diam_m"]/2.0)*1.15
+    L = m(P["bus_len_m"])*0.5
+    shell = Part.makeCylinder(R, L)
+    core = Part.makeCylinder(R-m(0.25), L+m(0.02))
+    jacket = shell.cut(core)
+    return jacket
+
+def make_whipple_regolith_shield(P, bus=None):
+    R = m(P["bus_diam_m"]/2.0)*1.35
+    L = m(P["bus_len_m"])*0.65
+    outer = Part.makeCylinder(R, L)
+    inner = Part.makeCylinder(R-m(0.15), L+m(0.03))
+    sh = outer.cut(inner)
+    return sh
+
+# ---- Station-specific simple makers ----
+
+def make_tps_campana(P):
+    return Part.makeCone(m(3.0), m(1.2), m(2.5))
+
+def make_bolts_rect_perimeter(P):
+    plate = Part.makeBox(m(6.0), m(6.0), m(0.2))
+    n = 12
+    bolts = []
+    for i in range(n):
+        x = -m(3.0) + m(6.0)*(i/(n-1.0))
+        bolts.append(translate(Part.makeCylinder(m(0.08), m(0.25)), dx=x, dy=m(3.0), dz=m(0.2)))
+        bolts.append(translate(Part.makeCylinder(m(0.08), m(0.25)), dx=x, dy=-m(3.0), dz=m(0.2)))
+    return plate.fuse(bolts)
+
+def make_edge_visors_rect(P):
+    frame = Part.makeBox(m(6.2), m(6.2), m(0.25))
+    hole = translate(Part.makeBox(m(5.6), m(5.6), m(0.3)), dx=m(0.3), dy=m(0.3), dz=-m(0.025))
+    visor = frame.cut(hole)
+    return visor
+
+def make_hex_ring(P):
+    # Anillo hex simple
+    r = m(3.4)
+    poly = Part.makePolygon([
+        App.Vector( r,0,0), App.Vector( r/2, r*0.866,0),
+        App.Vector(-r/2, r*0.866,0), App.Vector(-r,0,0),
+        App.Vector(-r/2,-r*0.866,0), App.Vector(r/2,-r*0.866,0),
+        App.Vector( r,0,0)
+    ])
+    face = Part.Face(Part.Wire(poly))
+    ring = face.extrude(App.Vector(0,0,m(0.35)))
+    return ring
+
+def make_tanks(P):
+    t1 = make_tank(1.0, 6.0)
+    t2 = translate(make_tank(0.9, 5.0), dx=m(3.2))
+    t3 = translate(make_tank(0.9, 5.0), dx=m(-3.2))
+    pad = translate(Part.makeBox(m(8.0), m(2.2), m(0.5)), dx=-m(4.0), dy=-m(1.1), dz=-m(0.25))
+    return pad.fuse([t1, t2, t3])
+
+def make_panels_with_grid(P, side=+1):
+    wing = make_panel(12.0, 4.0, 0.06)
+    wing = translate(wing, dy=side*m(7.0))
+    hinge = translate(Part.makeBox(m(0.8), m(0.6), m(1.2)), dy=side*m(3.0), dz=m(1.4))
+    return wing.fuse(hinge)
+
+def make_radiators(P):
+    plate1 = translate(make_panel(10.0, 3.0, 0.05), dz=m(2.0))
+    plate2 = translate(make_panel(10.0, 3.0, 0.05), dz=m(-2.0))
+    mast = Part.makeBox(m(0.4), m(0.6), m(5.0))
+    return mast.fuse([plate1, plate2])
+
+def make_rcs(P, bus=None):
+    return make_rcs_green(P, bus)
+
+def make_star_trackers(P):
+    body = Part.makeBox(m(0.8), m(0.8), m(0.6))
+    tube = Part.makeCylinder(m(0.18), m(0.4))
+    return body.fuse(translate(tube, dz=m(0.6)))
+
+def make_dish_and_whips(P):
+    dish = Part.makeSphere(m(1.2))
+    cut = Part.makeBox(m(2.4), m(2.4), m(2.4))
+    cut = translate(cut, dx=-m(1.2), dy=-m(1.2), dz=m(0.0))
+    dish = dish.common(cut)
+    base = Part.makeCylinder(m(0.4), m(0.6))
+    whip = Part.makeCylinder(m(0.04), m(3.0))
+    whip = translate(whip, dz=m(0.6))
+    return base.fuse([dish, whip])
+
+def make_boom(P):
+    return Part.makeBox(m(0.4), m(0.4), m(6.0))
+
+def make_whipple_shield(P, bus=None):
+    return make_whipple_regolith_shield(P, bus)
+
+def make_tank_armor(P, tanks):
+    bb = bbox(tanks)
+    shell = Part.makeBox(bb.XLength+m(0.6), bb.YLength+m(0.6), bb.ZLength+m(0.6))
+    shell = translate(shell, dx=bb.XMin-m(0.3), dy=bb.YMin-m(0.3), dz=bb.ZMin-m(0.3))
+    return shell.cut(translate(Part.makeBox(bb.XLength, bb.YLength, bb.ZLength), dx=bb.XMin, dy=bb.YMin, dz=bb.ZMin))
+
+def make_front_bumper_and_cutter(P):
+    wedge = Part.makeCone(m(2.0), m(0.4), m(2.2))
+    blade = Part.makeBox(m(3.0), m(0.2), m(0.4))
+    return wedge.fuse(translate(blade, dx=-m(1.5), dy=-m(0.1), dz=m(1.1)))
+
+def make_robot_arm(P, side=+1):
+    base = Part.makeCylinder(m(0.35), m(0.4))
+    link1 = Part.makeBox(m(0.3), m(0.3), m(2.0))
+    link2 = translate(Part.makeBox(m(0.3), m(0.3), m(1.6)), dz=m(1.9))
+    claw = translate(Part.makeBox(m(0.5), m(0.1), m(0.3)), dz=m(3.4))
+    arm = base.fuse([link1, link2, claw])
+    return translate(arm, dy=side*m(3.5))
+
+def make_drones(P, anchor_x=0.0, anchor_z=0.0):
+    body = Part.makeSphere(m(0.4))
+    spike = Part.makeCylinder(m(0.06), m(0.6))
+    d = body.fuse(spike)
+    d1 = translate(d, dx=m(anchor_x), dz=m(anchor_z))
+    d2 = translate(d, dx=m(anchor_x)+m(1.2), dz=m(anchor_z)+m(0.6))
+    d3 = translate(d, dx=m(anchor_x)-m(1.2), dz=m(anchor_z)+m(0.6))
+    return d1.fuse([d2, d3])
+
+def make_ultra_sensors(P, bus=None):
+    bar = Part.makeBox(m(3.0), m(0.4), m(0.4))
+    heads = []
+    for i in range(3):
+        heads.append(translate(Part.makeSphere(m(0.22)), dx=m(0.6*i), dz=m(0.2)))
+    return bar.fuse(heads)
+
+def make_lifeboat_capsules(P, bus=None):
+    pod = Part.makeSphere(m(1.0))
+    hull = Part.makeCylinder(m(1.0), m(1.2))
+    cap = translate(Part.makeSphere(m(1.0)), dz=m(1.2))
+    cap = cap.common(translate(Part.makeBox(m(2.0), m(2.0), m(1.0)), dx=-m(1.0), dy=-m(1.0), dz=m(1.2)))
+    boat = hull.fuse([pod, cap])
+    return translate(boat, dz=m(0.6))
+
+def make_water_jacket_and_shelter(P, bus=None):
+    return make_water_jacket(P, bus)
+
+def make_reactor_pack(P, bus=None):
+    core = Part.makeCylinder(m(0.9), m(1.6))
+    shield = Part.makeCylinder(m(1.2), m(0.7))
+    return translate(core, dz=-m(0.4)).fuse(shield)
+
+# -----------------------
+# Colocación respecto al bus (tocando con solape)
+# -----------------------
+
+def place_on_bus_front(shape, bus_shape, dz_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dz=bb.ZMax + dz_offset - overlap_eps())
+
+def place_on_bus_back(shape, bus_shape, dz_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dz=bb.ZMin - shape.BoundBox.ZLength + dz_offset + overlap_eps())
+
+def place_on_bus_left(shape, bus_shape, dy_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dy=bb.YMin - overlap_eps() - shape.BoundBox.YLength + dy_offset)
+
+def place_on_bus_right(shape, bus_shape, dy_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dy=bb.YMax + overlap_eps() + dy_offset)
+
+def place_on_bus_top(shape, bus_shape, dx_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dx=bb.XMax + overlap_eps() + dx_offset)
+
+def place_on_bus_bottom(shape, bus_shape, dx_offset=0.0):
+    bb = bbox(bus_shape)
+    return translate(shape, dx=bb.XMin - overlap_eps() - shape.BoundBox.XLength + dx_offset)
+
+# -----------------------
+# Ensamblajes
+# -----------------------
+
+def assemble_refinery(P):
+    P = with_defaults(P)
+    doc = ensure_doc()
+
+    # Bus principal
+    bus = make_bus(P)
+    bus_obj = add_obj(bus, "Bus_Main", color=(0.22,0.24,0.28))
+
+    shapes = [bus]
+
+    # Energía y térmico
+    reactor = place_on_bus_back(make_reactor_core(P, bus), bus)
+    add_obj(reactor, "Reactor_Core", color=(0.55,0.55,0.58))
+    shapes.append(reactor)
+
+    sol = place_on_bus_right(make_solar_concentrators(P), bus, dy_offset=m(0.2))
+    add_obj(sol, "Solar_Concentrators", color=(0.85,0.80,0.20))
+    shapes.append(sol)
+
+    rads = place_on_bus_left(make_radiator_wings(P), bus, dy_offset=-m(0.2))
+    add_obj(rads, "Radiators", color=(0.85,0.85,0.90))
+    shapes.append(rads)
+
+    # Refinería / ISRU
+    drills = place_on_bus_bottom(make_isru_drill_rigs(P), bus)
+    add_obj(drills, "ISRU_Drills", color=(0.50,0.45,0.40))
+    shapes.append(drills)
+
+    elx = place_on_bus_top(make_electrolyzer_stack(P), bus)
+    add_obj(elx, "Electrolyzer", color=(0.40,0.60,0.85))
+    shapes.append(elx)
+
+    sab = place_on_bus_top(make_sabatier_module(P), bus, dx_offset=m(2.8))
+    add_obj(sab, "Sabatier", color=(0.55,0.70,0.65))
+    shapes.append(sab)
+
+    tankfarm = place_on_bus_top(make_cryo_tankfarm(P), bus, dx_offset=m(6.0))
+    add_obj(tankfarm, "TankFarm", color=(0.75,0.75,0.80))
+    shapes.append(tankfarm)
+
+    d2 = place_on_bus_front(make_deuterium_enricher(P), bus)
+    add_obj(d2, "D2_Enricher", color=(0.70,0.75,0.85))
+    shapes.append(d2)
+
+    sep = place_on_bus_front(make_gas_separation_skids(P), bus, dz_offset=m(1.2))
+    add_obj(sep, "Gas_Seps", color=(0.65,0.65,0.68))
+    shapes.append(sep)
+
+    # Recolección
+    coil = place_on_bus_front(make_magscoop_coil(P), bus, dz_offset=m(0.8))
+    add_obj(coil, "MagScoop_Coil", color=(0.30,0.50,0.70))
+    shapes.append(coil)
+
+    escoops = place_on_bus_front(make_electrostatic_scoops(P), bus, dz_offset=m(0.2))
+    add_obj(escoops, "Electrostatic_Scoops", color=(0.75,0.75,0.80))
+    shapes.append(escoops)
+
+    tether = place_on_bus_bottom(make_tether_reel(P), bus, dx_offset=m(1.8))
+    add_obj(tether, "Tether_Reel", color=(0.55,0.55,0.60))
+    shapes.append(tether)
+
+    # Propulsión
+    hall = place_on_bus_back(make_hall_thruster_cluster(P, bus, prop="Ar"), bus, dz_offset=-m(0.4))
+    add_obj(hall, "Hall_Cluster", color=(0.45,0.45,0.48))
+    shapes.append(hall)
+
+    vas = place_on_bus_back(make_vasimr_thruster(P), bus, dz_offset=-m(0.9))
+    add_obj(vas, "VASIMR", color=(0.48,0.48,0.52))
+    shapes.append(vas)
+
+    rcs = place_on_bus_right(make_rcs_green(P), bus, dy_offset=m(2.0))
+    add_obj(rcs, "RCS_Green", color=(0.60,0.62,0.65))
+    shapes.append(rcs)
+
+    # Hábitat / agro / protección
+    hab = place_on_bus_left(make_iss_style_hab(P), bus, dy_offset=-m(2.5))
+    add_obj(hab, "Hab_Module", color=(0.78,0.78,0.80))
+    shapes.append(hab)
+
+    agro = place_on_bus_left(make_greenhouse_rings(P), bus, dy_offset=-m(6.5))
+    add_obj(agro, "Greenhouses", color=(0.35,0.60,0.35))
+    shapes.append(agro)
+
+    jacket = place_on_bus_front(make_water_jacket(P, bus), bus, dz_offset=m(0.1))
+    add_obj(jacket, "Water_Jacket", color=(0.30,0.40,0.50), transparency=30)
+    shapes.append(jacket)
+
+    shield = place_on_bus_front(make_whipple_regolith_shield(P), bus, dz_offset=m(0.0))
+    add_obj(shield, "Whipple_Regolith", color=(0.40,0.42,0.45), transparency=50)
+    shapes.append(shield)
+
+    doc.recompute()
+
+    fused = fuse_all(shapes)
+    fused_obj = add_obj(fused, "Refinery_Fused", color=(0.80,0.82,0.86))
+    doc.recompute()
+    if HAS_GUI:
+        try:
+            Gui.SendMsgToActiveView("ViewFit")
+            Gui.activeDocument().activeView().viewAxonometric()
+        except Exception:
+            pass
+    return fused_obj
+
+def assemble_station(P):
+    P = with_defaults(P)
+    doc = ensure_doc()
+
+    shapes = []
+
+    campana = make_tps_campana(P)
+    campana = translate(campana, dz=m(1.0))
+    add_obj(campana, "TPS_Campana", color=(0.20,0.20,0.22))
+    shapes.append(campana)
+
+    bolts = translate(make_bolts_rect_perimeter(P), dz=m(-0.2))
+    add_obj(bolts, "TPS_Bolts", color=(0.65,0.65,0.65))
+    shapes.append(bolts)
+
+    visors = translate(make_edge_visors_rect(P), dz=m(0.1))
+    add_obj(visors, "TPS_Visors", color=(0.30,0.30,0.32))
+    shapes.append(visors)
+
+    hexring = translate(make_hex_ring(P), dz=m(-0.1))
+    add_obj(hexring, "Hex_Ring", color=(0.35,0.35,0.37))
+    shapes.append(hexring)
+
+    bus = make_bus(P)
+    add_obj(bus, "Bus_Main", color=(0.22,0.24,0.28))
+    shapes.append(bus)
+
+    tanks = place_on_bus_left(make_tanks(P), bus, dy_offset=-m(2.4))
+    add_obj(tanks, "Side_Tanks", color=(0.55,0.56,0.58))
+    shapes.append(tanks)
+
+    panelR = place_on_bus_right(make_panels_with_grid(P, side=+1), bus, dy_offset=m(4.0))
+    add_obj(panelR, "Solar_Right", color=(0.06,0.16,0.25))
+    shapes.append(panelR)
+
+    panelL = place_on_bus_left(make_panels_with_grid(P, side=-1), bus, dy_offset=-m(4.0))
+    add_obj(panelL, "Solar_Left", color=(0.06,0.16,0.25))
+    shapes.append(panelL)
+
+    rads = place_on_bus_top(make_radiators(P), bus, dx_offset=m(1.2))
+    add_obj(rads, "Radiators", color=(0.85,0.85,0.90))
+    shapes.append(rads)
+
+    rcs = place_on_bus_right(make_rcs(P, bus), bus, dy_offset=m(1.5))
+    add_obj(rcs, "RCS_Thrusters", color=(0.45,0.45,0.48))
+    shapes.append(rcs)
+
+    st = place_on_bus_front(make_star_trackers(P), bus, dz_offset=m(0.5))
+    add_obj(st, "Star_Trackers", color=(0.70,0.70,0.75))
+    shapes.append(st)
+
+    comms = place_on_bus_top(make_dish_and_whips(P), bus, dx_offset=m(2.2))
+    add_obj(comms, "Comms", color=(0.78,0.78,0.80))
+    shapes.append(comms)
+
+    boom = place_on_bus_front(make_boom(P), bus, dz_offset=m(0.6))
+    add_obj(boom, "Instrument_Boom", color=(0.60,0.60,0.62))
+    shapes.append(boom)
+
+    whipple = place_on_bus_front(make_whipple_shield(P, bus), bus)
+    add_obj(whipple, "Shield_Whipple", color=(0.40,0.42,0.45), transparency=40)
+    shapes.append(whipple)
+
+    tankArmor = make_tank_armor(P, tanks)
+    add_obj(tankArmor, "Shield_Tanks", color=(0.45,0.47,0.50))
+    shapes.append(tankArmor)
+
+    bumper = place_on_bus_front(make_front_bumper_and_cutter(P), bus, dz_offset=m(1.6))
+    add_obj(bumper, "Front_Bumper_Cutter", color=(0.55,0.55,0.58))
+    shapes.append(bumper)
+
+    armR = place_on_bus_right(make_robot_arm(P, side=+1), bus, dy_offset=m(3.5))
+    add_obj(armR, "Robot_Arm_Right", color=(0.58,0.58,0.60))
+    shapes.append(armR)
+
+    armL = place_on_bus_left(make_robot_arm(P, side=-1), bus, dy_offset=-m(3.5))
+    add_obj(armL, "Robot_Arm_Left", color=(0.58,0.58,0.60))
+    shapes.append(armL)
+
+    drones = place_on_bus_front(make_drones(P, anchor_x=2.0, anchor_z=-1.0), bus, dz_offset=m(2.2))
+    add_obj(drones, "Interceptor_Drones", color=(0.50,0.52,0.55))
+    shapes.append(drones)
+
+    sensors = place_on_bus_top(make_ultra_sensors(P, bus), bus, dx_offset=m(0.8))
+    add_obj(sensors, "Ultra_Sensors", color=(0.75,0.76,0.78))
+    shapes.append(sensors)
+
+    lifeboats = place_on_bus_right(make_lifeboat_capsules(P, bus), bus, dy_offset=m(2.6))
+    add_obj(lifeboats, "Lifeboat_Capsules", color=(0.80,0.80,0.85))
+    shapes.append(lifeboats)
+
+    water_and_shelter = place_on_bus_front(make_water_jacket_and_shelter(P, bus), bus, dz_offset=m(0.2))
+    add_obj(water_and_shelter, "WaterJacket_StormShelter", color=(0.30,0.40,0.50), transparency=20)
+    shapes.append(water_and_shelter)
+
+    reactor_pack = place_on_bus_back(make_reactor_pack(P, bus), bus)
+    add_obj(reactor_pack, "Aft_Reactor_Pack", color=(0.55,0.55,0.58))
+    shapes.append(reactor_pack)
+
+    doc = ensure_doc()
+    doc.recompute()
+
+if __name__ == "__main__":
+    P = {
+        "solar_area_m2": 250.0,
+        "hall_clusters": 8,
+        "hall_diam_m": 2.0,
+        "magscoop_radius_m": 90.0,
+        "electrostatic_cones": 12,
+        "isru_drills": 4,
+        "D2_enricher_stages": 6,
+        "eclss_len_m": 20.0,
+        "eclss_diam_m": 8.0,
+        "greenhouse_bays": 4
+    }
+    assemble_satellite(P)
+

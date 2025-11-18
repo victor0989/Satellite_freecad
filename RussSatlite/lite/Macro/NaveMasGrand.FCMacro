@@ -1,0 +1,132 @@
+import math
+import FreeCAD as App
+import Part
+
+# ===================== Parámetros globales (mm) =====================
+# FACTOR DE ESCALA GENERAL
+scale_factor = 2.4  # ≈ +140% de incremento respecto a la base (tamaño 2.4×)
+
+# Dimensiones del bus (cuerpo) — más grande y alargado
+p_bus_w = 90.0 * scale_factor * 1.5    # largo frente–atrás (alargado)
+p_bus_d = 90.0 * scale_factor * 1.15   # ancho lateral
+p_bus_h = 120.0 * scale_factor * 1.2   # altura
+bus_skin_t = max(2.0, 2.0 * scale_factor * 0.6)  # piel más gruesa
+
+# Escudo térmico (TPS)
+shield_d = 220.0 * scale_factor * 1.25
+shield_thk = 12.0 * scale_factor * 0.9
+shield_cone = 22.0
+shield_gap = max(28.0 * scale_factor * 0.9, 30.0)
+shield_back_standoff = 10.0 * scale_factor * 0.9
+
+# Palas solares
+paddle_len = p_bus_w * 0.42
+paddle_root_w = p_bus_h * 0.22
+paddle_tip_w = p_bus_h * 0.14
+paddle_t = max(2.0, 2.0 * scale_factor * 0.7)
+paddle_y_offset = p_bus_d / 2.0 - 12.0
+paddle_tilt_deg = 18.0
+
+# Radiadores
+radiator_w = p_bus_d * 0.70
+radiator_h = p_bus_h * 0.85
+radiator_t = max(2.2, 2.2 * scale_factor * 0.6)
+radiator_back_offset = p_bus_w * 0.18
+radiator_fin_pitch = 14.0 * scale_factor * 0.8
+radiator_fin_w = max(1.2, 1.2 * scale_factor * 0.7)
+
+# Instrumentos delanteros
+faraday_len = p_bus_w * 0.18
+faraday_r = min(p_bus_d, p_bus_h) * 0.08
+whip_len = p_bus_w * 0.50
+whip_r = max(0.9, 0.9 * scale_factor * 0.7)
+
+# Antena trasera
+back_dish_d = p_bus_d * 0.90
+back_dish_depth = back_dish_d * 0.22
+steps_profile = 72
+t_bumper_ring = 1.2 * scale_factor
+boom_len_back = p_bus_w * 0.35
+boom_r = max(1.8, p_bus_d * 0.010)
+boom_tip_r = max(4.0, p_bus_d * 0.015)
+
+# Capas del plato
+layers_rear_dish = [
+    (0.8 * scale_factor * 0.9, (0.41, 0.41, 0.41), 0.95),
+    (0.3 * scale_factor * 0.9, (0.63, 0.32, 0.18), 0.55),
+    (3.0 * scale_factor * 0.9, (0.85, 0.65, 0.13), 0.55),
+]
+
+# Extras “sci‑fi” funcionales
+spine_w = p_bus_d * 0.20
+spine_h = max(6.0, p_bus_h * 0.03)
+whipple_t = max(3.0, 2.0 * scale_factor)
+whipple_cover_w = p_bus_d * 1.06
+whipple_cover_h = p_bus_h * 1.06
+whipple_gap_frac1 = 0.32
+whipple_gap_frac2 = 0.65
+
+# Exportación
+export_path = App.getUserAppDataDir() + "ParkerProbe_SciFi.step"
+
+
+# ===================== Extras “sci‑fi” funcionales =====================
+def build_spines(doc):
+    """Dos espinas estructurales (superior e inferior) a lo largo del bus."""
+    objs = []
+    # Superior
+    top = Part.makeBox(p_bus_w, spine_w, spine_h)
+    top.translate(App.Vector(-p_bus_w / 2.0, -spine_w / 2.0, p_bus_h / 2.0 - spine_h))
+    objs.append(add_part(doc, top, "Spine_Top", color=(0.22, 0.22, 0.26), transparency=0))
+    # Inferior
+    bot = Part.makeBox(p_bus_w, spine_w, spine_h)
+    bot.translate(App.Vector(-p_bus_w / 2.0, -spine_w / 2.0, -p_bus_h / 2.0))
+    objs.append(add_part(doc, bot, "Spine_Bottom", color=(0.22, 0.22, 0.26), transparency=0))
+    return objs
+
+
+def build_whipple_plates(doc):
+    """Placas Whipple en el hueco del TPS (protección micrometeoroides)."""
+    objs = []
+    for i, frac in enumerate((whipple_gap_frac1, whipple_gap_frac2), start=1):
+        plate = Part.makeBox(whipple_t, whipple_cover_w, whipple_cover_h)
+        x_center = p_bus_w / 2.0 + shield_gap * frac
+        plate.translate(App.Vector(
+            x_center - whipple_t / 2.0,
+            -whipple_cover_w / 2.0,
+            -whipple_cover_h / 2.0
+        ))
+        objs.append(add_part(doc, plate, f"WhipplePlate_{i}",
+                             color=(0.78, 0.78, 0.82), transparency=0.15))
+    return objs
+
+# ===================== Ensamblado y exportación =====================
+def build_spacecraft(doc):
+    all_objs = []
+    all_objs += build_bus(doc)
+    all_objs += build_heat_shield(doc)
+    all_objs += build_paddle(doc, side=+1)
+    all_objs += build_paddle(doc, side=-1)
+    all_objs += build_radiators(doc)
+    all_objs += build_instruments_front(doc)
+    all_objs += build_back_boom(doc)
+    all_objs += build_back_dish(doc)
+    all_objs += build_rcs(doc)
+    all_objs += build_hab_modules(doc)
+    return all_objs
+
+
+def main():
+    doc = App.newDocument("SpacecraftModel")
+    objs = build_spacecraft(doc)
+    doc.recompute()
+    try:
+        Part.export(objs, export_path)
+        App.Console.PrintMessage(f"Exportado STEP en: {export_path}\n")
+    except Exception as e:
+        App.Console.PrintError(f"Error exportando STEP: {e}\n")
+
+
+if __name__ == "__main__":
+    main()
+
